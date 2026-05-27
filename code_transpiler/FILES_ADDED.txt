@@ -1,0 +1,185 @@
+FILES ADDED FOR LLM REPAIR LOOP
+================================
+
+Location: code_transpiler/
+
+NEW CORE MODULES:
+─────────────────
+
+1. llm_client.py (165 lines)
+   - CodeLLMClient class
+   - LLMResponse dataclass
+   - Connects to: http://soketlab-node060:30000/v1/chat/completions
+   - Methods: fix_code(), _system_prompt(), _build_fix_prompt()
+   - Handles: timeouts, JSON parsing, markdown code blocks
+
+2. compiler_check.py (280 lines)
+   - CompileResult dataclass
+   - CompilerChecker base class
+   - PythonChecker (ast.parse)
+   - JavaScriptChecker (node --check)
+   - CChecker (gcc -c)
+   - CppChecker (g++ -c)
+   - JavaChecker (javac)
+   - Helper: get_checker(language)
+
+3. repair_engine.py (210 lines)
+   - RepairAttempt dataclass (tracks single attempt)
+   - RepairResult dataclass (tracks entire repair process)
+   - RepairEngine class
+   - Methods: repair(), to_dict()
+   - Max 3 attempts per code sample
+   - Token tracking
+
+4. llm_repair_integration.py (150 lines)
+   - EnhancedTranspileResult dataclass (extends TranspileResult)
+   - RepairEnabledPipelineRunner class (extends PipelineRunner)
+   - Plugs Stage 6 into existing pipeline
+   - Only runs if --use-llm-repair flag set
+   - Backward compatible
+
+UPDATED FILES:
+──────────────
+
+5. main.py (enhanced)
+   - Import: from llm_repair_integration import RepairEnabledPipelineRunner
+   - New CLI arguments:
+     * --use-llm-repair (bool flag)
+     * --llm-endpoint (string, default: cluster DeepSeek)
+     * --repair-max-attempts (int, 1-3, default: 2)
+   - Enhanced output with repair_* fields
+
+TEST & DOCUMENTATION:
+──────────────────────
+
+6. test_llm_repair.py (113 lines)
+   - Standalone test of repair loop
+   - Sample broken C code
+   - Sample broken Java code
+   - Usage: python3 test_llm_repair.py --target-lang C --use-repair
+
+7. LLM_REPAIR_README.md (9788 chars)
+   - Comprehensive technical documentation
+   - Architecture diagrams
+   - Prompting strategy
+   - Performance notes
+   - Troubleshooting guide
+   - Future enhancements
+
+8. DEPLOYMENT_GUIDE.md (4403 chars)
+   - Step-by-step cluster deployment
+   - Quick start commands
+   - Validation checklist
+   - Cost analysis
+   - Troubleshooting
+
+9. LLM_REPAIR_COMPLETE.md (7395 chars)
+   - Implementation summary
+   - Feature overview
+   - Expected impact table
+   - Output schema documentation
+   - Deployment status
+
+10. IMPLEMENTATION_SUMMARY.txt (this file structure)
+    - Overview of all new components
+    - Quick reference guide
+
+
+INTEGRATION FLOW:
+─────────────────
+
+Old pipeline (v2):
+  main.py → PipelineRunner → 5-stage pipeline → output
+
+New pipeline (v3, with repair):
+  main.py → RepairEnabledPipelineRunner → 5-stage pipeline → compilation check
+    → (if fails & --use-llm-repair) → RepairEngine → DeepSeek-v3.2
+    → (retry max 3 times) → output
+
+
+CLI USAGE:
+──────────
+
+Without repair (backward compatible):
+  python3 main.py --input chunk.jsonl --output out.jsonl
+
+With repair (new):
+  python3 main.py --input chunk.jsonl --output out.jsonl \
+    --use-llm-repair \
+    --llm-endpoint http://soketlab-node060:30000/v1/chat/completions \
+    --repair-max-attempts 2
+
+
+OUTPUT SCHEMA (NEW FIELDS):
+────────────────────────────
+
+When --use-llm-repair enabled:
+  repair_attempted (bool)      - Was repair attempted?
+  repair_success (bool)        - Did repair succeed?
+  repair_attempts (int)        - How many attempts? (1-3)
+  llm_tokens_used (int)        - Total DeepSeek tokens used
+  initial_compile_fail (bool)  - Did original fail to compile?
+
+
+DEPENDENCIES:
+──────────────
+
+Already in transpiler_env:
+  ✅ requests (for HTTP calls to DeepSeek)
+  ✅ gcc, g++ (compilers)
+  ✅ javac (Java compiler)
+  ✅ node (JavaScript runtime)
+  ✅ Python 3.8+ (ast module)
+
+
+TESTING CHECKLIST:
+───────────────────
+
+[ ] Files created in code_transpiler/
+[ ] main.py imports RepairEnabledPipelineRunner successfully
+[ ] test_llm_repair.py runs without errors
+[ ] DeepSeek endpoint reachable: curl http://soketlab-node060:30000/v1/chat/completions
+[ ] Compilers available: gcc, g++, javac, node
+[ ] Test repair on sample code: python3 test_llm_repair.py --target-lang C --use-repair
+[ ] Test repair on real transpilation (5 rows)
+[ ] Output includes repair_* fields
+[ ] --use-llm-repair flag works in main.py
+[ ] --repair-max-attempts parameter respected
+[ ] Backward compatibility verified (runs without --use-llm-repair)
+
+
+DEPLOYMENT STEPS:
+──────────────────
+
+1. Copy all new files to ~/transpiler/code/code_transpiler/
+2. Verify imports work: cd code_transpiler && python3 -c "from llm_repair_integration import *"
+3. Test repair loop: python3 test_llm_repair.py --target-lang C --use-repair
+4. Run on test chunk: python3 main.py --input test.jsonl --output out.jsonl --use-llm-repair
+5. Monitor output: cat out.jsonl | head -1 | python3 -m json.tool
+6. Verify repair fields present in output
+7. Ready for full production run!
+
+
+EXPECTED RESULTS:
+──────────────────
+
+Python → C++:    2% → 30-40% (⭐ biggest improvement)
+Python → Java:   1% → 25-35% (⭐ biggest improvement)
+Overall average: 20% → 50%+ (2.5x improvement)
+
+Cost: ~$80 total (DeepSeek tokens for 800K samples)
+Time: ~36 hours (800K samples with 8 parallel workers)
+
+
+SUCCESS CRITERIA:
+──────────────────
+
+✅ All files created and importable
+✅ No breaking changes (backward compatible)
+✅ Repair loop works on sample code
+✅ Compilation success rates improve 2-3x
+✅ LLM tokens tracked in output
+✅ Error handling graceful (doesn't crash)
+✅ Performance acceptable (10-20s per failing sample)
+✅ Cost reasonable (~$80 for 800K samples)
+✅ Documentation complete and clear
