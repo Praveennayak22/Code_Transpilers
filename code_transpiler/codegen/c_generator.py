@@ -47,9 +47,16 @@ class CGenerator(BaseGenerator):
     NEQ_OP = "!="
 
     def generate_Module(self, node: Module) -> None:
+        # Always-present base headers
+        hardcoded = {"stdio.h", "stdlib.h", "string.h"}
         self._write("#include <stdio.h>")
         self._write("#include <stdlib.h>")
         self._write("#include <string.h>")
+        # Extra headers injected by transform (e.g. math.h, ctype.h)
+        for imp in node.imports:
+            hdr = imp.module.strip()
+            if hdr and hdr not in hardcoded:
+                self._write(f"#include <{hdr}>")
         self._blank()
         # Generate all function definitions
         for stmt in node.body:

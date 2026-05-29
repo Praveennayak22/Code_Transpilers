@@ -1,20 +1,42 @@
 """
 transforms/engine.py
 ====================
-Stage 4 Transform Engine — ALL passes for maximum compilation improvement.
+Stage 4 Transform Engine — target-language-specific IR adaptation passes.
+
+Every language pair now has at least one guaranteed-firing pass that makes
+transformed_IR meaningfully different from canonical_IR.
 
 Passes for C / C++ targets:
-  1. pass_range_to_forloop       — for x in range(n) -> for(int x=0;x<n;x+=1)
-  2. pass_input_to_scanf         — x=input("msg")    -> printf+scanf
-  3. pass_string_methods_to_c    — s.lower()         -> str_lower(s)
-  4. pass_strip_python_globals   — __name__,__author__ -> removed
-  5. pass_flatten_main_guard     — if __name__=="__main__": -> body only
-  6. pass_sys_to_c               — sys.exit() -> exit(), sys.argv -> argv
-  7. pass_infer_variable_types   — x=5 -> int x=5 (basic type inference)
-  8. pass_strip_python_typing    — Optional[X],List[X] -> None annotation
+  1.  pass_range_to_forloop       — for x in range(n) -> for(int x=0;x<n;x+=1)
+  2.  pass_input_to_scanf         — x=input("msg")    -> printf+scanf
+  3.  pass_string_methods_to_c    — s.lower()         -> str_lower(s)
+  4.  pass_strip_python_globals   — __name__,__author__ -> removed
+  5.  pass_flatten_main_guard     — if __name__=="__main__": -> body only
+  6.  pass_sys_to_c               — sys.exit() -> exit(), sys.argv -> argv
+  7.  pass_infer_variable_types   — x=5 -> int x=5 (basic type inference)
+  8.  pass_strip_python_typing    — Optional[X],List[X] -> None annotation
+  9.  pass_inject_c_headers       — auto-inject #include headers for used symbols
 
-Passes for Python target:
-  9. pass_clean_java_types       — String[],List<T> -> None annotation
+Passes for Java target:
+  10. pass_python_types_to_java   — str->String, bool->boolean, int->int etc.
+  11. pass_print_to_system_out    — PrintStmt -> System.out.println(...)
+  12. pass_inject_java_imports    — auto-inject java.util.* etc. based on usage
+  13. pass_wrap_in_java_class     — wrap all top-level functions in public class Main
+
+Passes for JavaScript target:
+  14. pass_vars_to_let            — bare Assignment at top/fn level -> let x = ...
+  15. pass_print_to_console_log   — PrintStmt -> console.log(...)
+
+Passes for Python target (from Java):
+  16. pass_clean_java_types       — String[],List<T> -> None annotation
+
+Passes for Python target (from C/C++):
+  17. pass_strip_c_headers        — Remove stdio.h, stdlib.h imports
+  18. pass_strip_c_main           — Remove main() wrapper
+  19. pass_clean_java_types       — Reuse: strip any leftover type annotations
+
+Passes for Python target (from JavaScript):
+  20. pass_console_to_print       — console.log -> print
 """
 
 from __future__ import annotations
@@ -23,11 +45,10 @@ from ir.nodes import (
     ForEachLoop, ForLoop, ListComp, Assignment, VarDecl, AugAssignment,
     ExprStmt, PrintStmt, Call, Name, Attribute,
     Literal, BinaryOp, ListLiteral, IfStmt, CompareOp,
-    WhileLoop, TryExcept, Param, Return, DictLiteral,
+    WhileLoop, TryExcept, Param, Return, DictLiteral, Import,
     TupleLiteral, SetLiteral,
 )
 from typing import List, Callable, Optional, Set
-
 
 TransformPass = Callable[[Module, str, str], Module]
 
@@ -41,21 +62,42 @@ def run_transforms(ir: Module, source_lang: str, target_lang: str) -> Module:
 
 def _get_passes(source_lang: str, target_lang: str) -> List[TransformPass]:
     passes = []
+
+    # ── → C / C++ ─────────────────────────────────────────────────────────────
     if target_lang in ("C", "C++"):
-        passes.append(pass_strip_python_globals)    # Remove __name__, __author__
-        passes.append(pass_flatten_main_guard)      # Flatten if __name__=="__main__"
-        passes.append(pass_strip_python_typing)     # Remove Optional[X], List[X] etc.
-        passes.append(pass_sys_to_c)               # sys.exit()->exit(), sys.argv->argv
-        passes.append(pass_range_to_forloop)        # range() -> C for loop
-        passes.append(pass_input_to_scanf)          # input() -> scanf
-        passes.append(pass_string_methods_to_c)    # s.lower() -> str_lower(s)
-        passes.append(pass_infer_variable_types)   # x=5 -> int x=5
-    if target_lang == "Python" and source_lang == "Java":
-        passes.append(pass_clean_java_types)        # Strip String[], List<T>
-    if target_lang == "Python" and source_lang in ("C", "C++"):
-        passes.append(pass_strip_c_headers)         # Remove stdio.h, stdlib.h imports
-        passes.append(pass_strip_c_main)            # Remove main() wrapper
-        passes.append(pass_clean_java_types)        # Reuse: strip any leftover type annotations
+        passes.append(pass_strip_python_globals)
+        passes.append(pass_flatten_main_guard)
+        passes.append(pass_strip_python_typing)
+        passes.append(pass_sys_to_c)
+        passes.append(pass_range_to_forloop)
+        passes.append(pass_input_to_scanf)
+        passes.append(pass_string_methods_to_c)
+        passes.append(pass_infer_variable_types)
+        passes.append(pass_inject_c_headers)      # NEW — always fires
+
+    # ── → Java ────────────────────────────────────────────────────────────────
+    elif target_lang == "Java":
+        passes.append(pass_python_types_to_java)   # NEW — always fires on typed params
+        passes.append(pass_print_to_system_out)    # NEW — always fires
+        passes.append(pass_inject_java_imports)    # NEW — always fires
+        passes.append(pass_wrap_in_java_class)     # NEW — always fires
+
+    # ── → JavaScript ──────────────────────────────────────────────────────────
+    elif target_lang == "JavaScript":
+        passes.append(pass_print_to_console_log)   # NEW — always fires
+        passes.append(pass_vars_to_let)            # NEW — always fires
+
+    # ── → Python ──────────────────────────────────────────────────────────────
+    elif target_lang == "Python":
+        if source_lang == "Java":
+            passes.append(pass_clean_java_types)
+        if source_lang in ("C", "C++"):
+            passes.append(pass_strip_c_headers)
+            passes.append(pass_strip_c_main)
+            passes.append(pass_clean_java_types)
+        if source_lang == "JavaScript":
+            passes.append(pass_console_to_print)   # NEW — always fires
+
     return passes
 
 
@@ -175,7 +217,7 @@ def _remap_calls(node: CanonicalNode):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Pass 4 — Strip Python dunder globals (__name__, __author__, etc.)
+# Pass 4 — Strip Python dunder globals
 # ─────────────────────────────────────────────────────────────────────────────
 
 _DUNDER_VARS: Set[str] = {
@@ -186,7 +228,7 @@ _DUNDER_VARS: Set[str] = {
 
 
 def pass_strip_python_globals(ir: Module, src: str, tgt: str) -> Module:
-    """Remove __author__ = ..., __version__ = ... etc. from module body."""
+    """Remove __author__ = ..., __version__ = ... etc."""
     ir.body = _strip_dunders(ir.body)
     return ir
 
@@ -204,20 +246,13 @@ def _strip_dunders(stmts: list) -> list:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Pass 5 — Flatten if __name__ == "__main__": body into module level
+# Pass 5 — Flatten if __name__ == "__main__": body
 # ─────────────────────────────────────────────────────────────────────────────
 
 def pass_flatten_main_guard(ir: Module, src: str, tgt: str) -> Module:
-    """
-    if __name__ == "__main__":
-        do_stuff()
-    ->
-    do_stuff()    (body inlined at module level, or into main())
-    """
     new_body = []
     for stmt in ir.body:
         if _is_main_guard(stmt):
-            # Inline the body — these become top-level statements
             new_body.extend(stmt.then_body)
         else:
             new_body.append(stmt)
@@ -231,7 +266,7 @@ def _is_main_guard(stmt) -> bool:
     cond = stmt.condition
     if not isinstance(cond, CompareOp):
         return False
-    left_is_name = isinstance(cond.left, Name) and cond.left.id == "__name__"
+    left_is_name  = isinstance(cond.left, Name) and cond.left.id == "__name__"
     right_is_main = (isinstance(cond.right, Literal)
                      and str(cond.right.value) == "__main__")
     return left_is_name and right_is_main and cond.op == "=="
@@ -242,14 +277,6 @@ def _is_main_guard(stmt) -> bool:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def pass_sys_to_c(ir: Module, src: str, tgt: str) -> Module:
-    """
-    sys.exit(0)   -> exit(0)
-    sys.exit()    -> exit(0)
-    sys.argv      -> argv
-    sys.stdin     -> stdin
-    sys.stdout    -> stdout
-    sys.stderr    -> stderr
-    """
     _remap_sys_calls(ir)
     return ir
 
@@ -259,7 +286,6 @@ def _remap_sys_calls(node: CanonicalNode):
         return
     for fname, fval in node.__dict__.items():
         if isinstance(fval, Call):
-            # sys.exit(...) -> exit(...)
             if (isinstance(fval.func, Attribute)
                     and isinstance(fval.func.obj, Name)
                     and fval.func.obj.id == "sys"):
@@ -272,13 +298,11 @@ def _remap_sys_calls(node: CanonicalNode):
                     fval.func = Name(id=attr)
             _remap_sys_calls(fval)
         elif isinstance(fval, Attribute):
-            # sys.argv -> argv, sys.stdin -> stdin
             if (isinstance(fval.obj, Name) and fval.obj.id == "sys"):
                 attr_map = {"argv": "argv", "stdin": "stdin",
                             "stdout": "stdout", "stderr": "stderr",
                             "maxsize": "INT_MAX", "version": "\"3\""}
                 if fval.attr in attr_map:
-                    # Replace in-place by changing the node's fields
                     fval.obj  = Name(id="")
                     fval.attr = attr_map[fval.attr]
         elif isinstance(fval, CanonicalNode):
@@ -290,27 +314,18 @@ def _remap_sys_calls(node: CanonicalNode):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Pass 7 — Basic type inference for variable declarations
+# Pass 7 — Basic type inference for C/C++ variable declarations
 # ─────────────────────────────────────────────────────────────────────────────
 
 def pass_infer_variable_types(ir: Module, src: str, tgt: str) -> Module:
-    """
-    Convert first assignment of each variable to a typed VarDecl.
-    x = 5        -> int x = 5;
-    name = "hi"  -> char* name = "hi";
-    pi = 3.14    -> double pi = 3.14;
-    """
-    # Walk all function bodies + top-level body
     for node in _all_nodes(ir):
         if isinstance(node, FunctionDef):
             node.body = _infer_in_body(node.body)
-    # Top-level (goes into main() in C)
     ir.body = _infer_in_body(ir.body)
     return ir
 
 
 def _infer_type_from_value(value_node) -> str:
-    """Infer C type from an expression node."""
     if isinstance(value_node, Literal):
         mapping = {"int": "int", "float": "double",
                    "string": "char*", "bool": "int", "null": "void*"}
@@ -322,7 +337,6 @@ def _infer_type_from_value(value_node) -> str:
     if isinstance(value_node, (TupleLiteral, SetLiteral)):
         return "int*"
     if isinstance(value_node, Call):
-        # Common patterns
         if isinstance(value_node.func, Name):
             name_map = {
                 "int": "int", "float": "double", "str": "char*",
@@ -331,17 +345,14 @@ def _infer_type_from_value(value_node) -> str:
             }
             return name_map.get(value_node.func.id, "int")
     if isinstance(value_node, BinaryOp):
-        # Try to infer from left operand
         return _infer_type_from_value(value_node.left)
-    return "int"  # Safe default
+    return "int"
 
 
 def _infer_in_body(stmts: list) -> list:
-    """Convert first Assignment for each new variable into a VarDecl."""
     declared: Set[str] = set()
     out = []
     for stmt in stmts:
-        # Skip: already declared, dunder vars, or non-Name targets
         if (isinstance(stmt, Assignment)
                 and isinstance(stmt.target, Name)
                 and stmt.target.id not in declared
@@ -349,13 +360,8 @@ def _infer_in_body(stmts: list) -> list:
             var = stmt.target.id
             declared.add(var)
             c_type = _infer_type_from_value(stmt.value)
-            out.append(VarDecl(
-                name=var,
-                type_annotation=c_type,
-                value=stmt.value,
-            ))
+            out.append(VarDecl(name=var, type_annotation=c_type, value=stmt.value))
         else:
-            # Track VarDecl names too
             if isinstance(stmt, VarDecl):
                 declared.add(stmt.name)
             out.append(stmt)
@@ -374,7 +380,6 @@ _TYPING_PREFIXES = (
 
 
 def pass_strip_python_typing(ir: Module, src: str, tgt: str) -> Module:
-    """Strip Python typing annotations: Optional[X], List[X], Dict[K,V] etc."""
     for node in _all_nodes(ir):
         if isinstance(node, FunctionDef):
             for p in node.params:
@@ -388,18 +393,374 @@ def pass_strip_python_typing(ir: Module, src: str, tgt: str) -> Module:
 def _strip_typing(ann: Optional[str]) -> Optional[str]:
     if ann is None:
         return None
-    # Strip anything that looks like a typing generic: Optional[X], List[X]
     for prefix in _TYPING_PREFIXES:
         if ann.startswith(prefix):
             return None
-    # Also strip if contains brackets (any generic)
     if "[" in ann or "]" in ann:
         return None
     return ann
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Pass 9 — Clean Java type annotations for Python target
+# Pass 9 — NEW: Inject C/C++ #include headers based on symbols used
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Maps function/symbol names → the C/C++ header that provides them
+_C_SYMBOL_TO_HEADER = {
+    # stdio.h
+    "printf": "stdio.h", "scanf": "stdio.h", "fprintf": "stdio.h",
+    "fscanf": "stdio.h", "sprintf": "stdio.h", "sscanf": "stdio.h",
+    "fopen": "stdio.h", "fclose": "stdio.h", "fread": "stdio.h",
+    "fwrite": "stdio.h", "fgets": "stdio.h", "fputs": "stdio.h",
+    "puts": "stdio.h", "gets": "stdio.h", "getchar": "stdio.h",
+    "putchar": "stdio.h", "EOF": "stdio.h", "FILE": "stdio.h",
+    # stdlib.h
+    "malloc": "stdlib.h", "calloc": "stdlib.h", "realloc": "stdlib.h",
+    "free": "stdlib.h", "exit": "stdlib.h", "atoi": "stdlib.h",
+    "atof": "stdlib.h", "atol": "stdlib.h", "rand": "stdlib.h",
+    "srand": "stdlib.h", "abs": "stdlib.h", "qsort": "stdlib.h",
+    # string.h
+    "strlen": "string.h", "strcpy": "string.h", "strncpy": "string.h",
+    "strcat": "string.h", "strcmp": "string.h", "strncmp": "string.h",
+    "strchr": "string.h", "strstr": "string.h", "memset": "string.h",
+    "memcpy": "string.h", "memmove": "string.h",
+    # math.h
+    "sqrt": "math.h", "pow": "math.h", "fabs": "math.h", "ceil": "math.h",
+    "floor": "math.h", "log": "math.h", "log2": "math.h", "log10": "math.h",
+    "sin": "math.h", "cos": "math.h", "tan": "math.h", "exp": "math.h",
+    "round": "math.h", "fmod": "math.h",
+    # C++ iostream
+    "cout": "iostream", "cin": "iostream", "cerr": "iostream",
+    "endl": "iostream",
+    # C++ string
+    "string": "string",
+    # C++ vector
+    "vector": "vector",
+    # C++ algorithm
+    "sort": "algorithm", "find": "algorithm", "max": "algorithm",
+    "min": "algorithm", "reverse": "algorithm", "count": "algorithm",
+    # C++ map/set
+    "map": "map", "set": "set", "unordered_map": "unordered_map",
+    "unordered_set": "unordered_set",
+    # C++ stack/queue
+    "stack": "stack", "queue": "queue", "priority_queue": "queue",
+    # ctype.h
+    "isdigit": "ctype.h", "isalpha": "ctype.h", "isspace": "ctype.h",
+    "toupper": "ctype.h", "tolower": "ctype.h",
+    # stdbool.h (C only)
+    "bool": "stdbool.h", "true": "stdbool.h", "false": "stdbool.h",
+}
+
+# C++ vs C specific headers (we include both and let the compiler sort it)
+_CPP_ONLY_HEADERS = {"iostream", "string", "vector", "algorithm", "map", "set",
+                     "unordered_map", "unordered_set", "stack", "queue"}
+
+
+def pass_inject_c_headers(ir: Module, src: str, tgt: str) -> Module:
+    """
+    Scan all function calls in the IR.
+    For every known symbol, inject the corresponding #include header.
+    Always inject stdio.h for C (printf is almost always needed).
+    """
+    needed: Set[str] = set()
+
+    # Always include stdio.h for C/C++ — almost every program needs it
+    needed.add("stdio.h")
+    if tgt == "C++":
+        needed.add("iostream")
+
+    # Collect all called function names
+    for node in _all_nodes(ir):
+        if isinstance(node, Call):
+            if isinstance(node.func, Name):
+                hdr = _C_SYMBOL_TO_HEADER.get(node.func.id)
+                if hdr:
+                    # Skip C++ headers if target is pure C
+                    if tgt == "C" and hdr in _CPP_ONLY_HEADERS:
+                        continue
+                    needed.add(hdr)
+            elif isinstance(node.func, Attribute):
+                hdr = _C_SYMBOL_TO_HEADER.get(node.func.attr)
+                if hdr:
+                    if tgt == "C" and hdr in _CPP_ONLY_HEADERS:
+                        continue
+                    needed.add(hdr)
+        elif isinstance(node, Name):
+            hdr = _C_SYMBOL_TO_HEADER.get(node.id)
+            if hdr:
+                if tgt == "C" and hdr in _CPP_ONLY_HEADERS:
+                    continue
+                needed.add(hdr)
+
+    # Preferred header ordering
+    _ORDER = ["stdio.h", "stdlib.h", "string.h", "math.h", "ctype.h",
+              "stdbool.h", "iostream", "string", "vector", "algorithm",
+              "map", "set", "unordered_map", "unordered_set", "stack", "queue"]
+
+    def _hdr_key(h):
+        try:
+            return _ORDER.index(h)
+        except ValueError:
+            return 999
+
+    # Prepend headers to ir.imports (deduplicate)
+    existing = {imp.module for imp in ir.imports}
+    new_imports = []
+    for hdr in sorted(needed, key=_hdr_key):
+        if hdr not in existing:
+            new_imports.append(Import(module=hdr))
+    ir.imports = new_imports + ir.imports
+    return ir
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Pass 10 — NEW: Python types → Java types
+# ─────────────────────────────────────────────────────────────────────────────
+
+_PY_TO_JAVA = {
+    "int": "int", "float": "double", "str": "String", "bool": "boolean",
+    "list": "List", "dict": "Map", "set": "Set", "tuple": "Object[]",
+    "None": "void", "bytes": "byte[]", "object": "Object",
+    # Already Java types (pass-through)
+    "String": "String", "boolean": "boolean", "double": "double",
+    "long": "long", "short": "short", "byte": "byte", "char": "char",
+    "Integer": "Integer", "Double": "Double", "Boolean": "Boolean",
+    "void": "void",
+}
+
+
+def pass_python_types_to_java(ir: Module, src: str, tgt: str) -> Module:
+    """Convert Python type annotations to Java types on all params and returns."""
+    for node in _all_nodes(ir):
+        if isinstance(node, FunctionDef):
+            for p in node.params:
+                # Params: unknown type -> Object
+                p.type_annotation = _py_to_java_type(p.type_annotation, default="Object")
+            # Return types: unknown/missing -> void (not Object)
+            node.return_type = _py_to_java_type(node.return_type, default="void")
+            node.is_static = True
+            node.access_modifier = "public"
+        elif isinstance(node, VarDecl):
+            node.type_annotation = _py_to_java_type(node.type_annotation, default="Object")
+    return ir
+
+
+def _py_to_java_type(ann: Optional[str], default: str = "Object") -> Optional[str]:
+    if ann is None:
+        return default
+    base = ann.split("[")[0].strip()
+    return _PY_TO_JAVA.get(base, default)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Pass 11 — NEW: PrintStmt → System.out.println for Java
+# ─────────────────────────────────────────────────────────────────────────────
+
+def pass_print_to_system_out(ir: Module, src: str, tgt: str) -> Module:
+    """PrintStmt(args=[x]) -> System.out.println(x)"""
+    _walk_and_fix_bodies(ir, _print_to_sysout_fix)
+    return ir
+
+
+def _print_to_sysout_fix(stmts: list) -> list:
+    out = []
+    for stmt in stmts:
+        if isinstance(stmt, PrintStmt):
+            # Build System.out.println(args joined by +)
+            if len(stmt.args) == 0:
+                args = [Literal(value="", kind="string")]
+            elif len(stmt.args) == 1:
+                args = [stmt.args[0]]
+            else:
+                # Join multiple args: arg1 + " " + arg2 + ...
+                joined = stmt.args[0]
+                for a in stmt.args[1:]:
+                    joined = BinaryOp(
+                        left=BinaryOp(left=joined, op="+",
+                                      right=Literal(value=" ", kind="string")),
+                        op="+", right=a
+                    )
+                args = [joined]
+            out.append(ExprStmt(expr=Call(
+                func=Attribute(
+                    obj=Attribute(obj=Name(id="System"), attr="out"),
+                    attr="println"
+                ),
+                args=args,
+            )))
+        else:
+            out.append(stmt)
+    return out
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Pass 12 — NEW: Inject java.util.* imports based on usage
+# ─────────────────────────────────────────────────────────────────────────────
+
+_JAVA_TYPE_TO_IMPORT = {
+    "List":          "java.util.List",
+    "ArrayList":     "java.util.ArrayList",
+    "Map":           "java.util.Map",
+    "HashMap":       "java.util.HashMap",
+    "Set":           "java.util.Set",
+    "HashSet":       "java.util.HashSet",
+    "LinkedList":    "java.util.LinkedList",
+    "Queue":         "java.util.Queue",
+    "Stack":         "java.util.Stack",
+    "Collections":   "java.util.Collections",
+    "Arrays":        "java.util.Arrays",
+    "Optional":      "java.util.Optional",
+    "Iterator":      "java.util.Iterator",
+    "Scanner":       "java.util.Scanner",
+    "Random":        "java.util.Random",
+    "Math":          "java.lang.Math",
+}
+
+
+def pass_inject_java_imports(ir: Module, src: str, tgt: str) -> Module:
+    """
+    Scan the IR for Java type names / function calls.
+    Auto-inject the corresponding import statements.
+    Always inject java.util.* as a catch-all safety net.
+    """
+    needed: Set[str] = {"java.util.*"}   # Always inject as safety net
+
+    # Scan for specific types in use
+    for node in _all_nodes(ir):
+        if isinstance(node, (VarDecl, Param, FunctionDef)):
+            ann = getattr(node, "type_annotation", None) or getattr(node, "return_type", None)
+            if ann and ann in _JAVA_TYPE_TO_IMPORT:
+                needed.add(_JAVA_TYPE_TO_IMPORT[ann])
+        if isinstance(node, Name) and node.id in _JAVA_TYPE_TO_IMPORT:
+            needed.add(_JAVA_TYPE_TO_IMPORT[node.id])
+
+    existing_modules = {imp.module for imp in ir.imports}
+    new_imports = [Import(module=m) for m in sorted(needed)
+                   if m not in existing_modules]
+    ir.imports = new_imports + ir.imports
+    return ir
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Pass 13 — NEW: Wrap everything in public class Main
+# ─────────────────────────────────────────────────────────────────────────────
+
+def pass_wrap_in_java_class(ir: Module, src: str, tgt: str) -> Module:
+    """
+    Wrap all top-level functions and statements inside:
+        public class Main {
+            ...methods...
+            public static void main(String[] args) { ...statements... }
+        }
+
+    If there is already a top-level ClassDef, leave it as-is (don't double-wrap).
+    """
+    # Check if already has a top-level class (don't double-wrap)
+    has_class = any(isinstance(n, ClassDef) for n in ir.body)
+    if has_class:
+        return ir
+
+    functions = []
+    statements = []
+
+    for node in ir.body:
+        if isinstance(node, FunctionDef):
+            node.is_static = True
+            node.access_modifier = "public"
+            functions.append(node)
+        else:
+            statements.append(node)
+
+    # Build a main() method from the top-level statements
+    main_body = statements if statements else []
+    main_method = FunctionDef(
+        name="main",
+        params=[Param(name="args", type_annotation="String[]")],
+        body=main_body,
+        return_type="void",
+        is_static=True,
+        access_modifier="public",
+    )
+
+    class_body = functions + ([main_method] if main_body else [])
+
+    if not class_body:
+        return ir   # Nothing to wrap
+
+    main_class = ClassDef(
+        name="Main",
+        bases=[],
+        body=class_body,
+    )
+
+    ir.body = [main_class]
+    return ir
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Pass 14 — NEW: Bare assignments → let declarations for JavaScript
+# ─────────────────────────────────────────────────────────────────────────────
+
+def pass_vars_to_let(ir: Module, src: str, tgt: str) -> Module:
+    """
+    Convert first assignment of each variable to a VarDecl with type='let'.
+    x = 5  ->  let x = 5
+    """
+    for node in _all_nodes(ir):
+        if isinstance(node, FunctionDef):
+            node.body = _vars_to_let_in_body(node.body)
+    ir.body = _vars_to_let_in_body(ir.body)
+    return ir
+
+
+def _vars_to_let_in_body(stmts: list) -> list:
+    declared: Set[str] = set()
+    out = []
+    for stmt in stmts:
+        if (isinstance(stmt, Assignment)
+                and isinstance(stmt.target, Name)
+                and stmt.target.id not in declared
+                and not stmt.target.id.startswith("__")):
+            var = stmt.target.id
+            declared.add(var)
+            out.append(VarDecl(
+                name=var,
+                type_annotation="let",   # "let" used as JS keyword marker
+                value=stmt.value,
+            ))
+        else:
+            if isinstance(stmt, VarDecl):
+                declared.add(stmt.name)
+            out.append(stmt)
+    return out
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Pass 15 — NEW: PrintStmt / print() → console.log() for JavaScript
+# ─────────────────────────────────────────────────────────────────────────────
+
+def pass_print_to_console_log(ir: Module, src: str, tgt: str) -> Module:
+    """PrintStmt(args=[x,y]) -> console.log(x, y)"""
+    _walk_and_fix_bodies(ir, _print_to_console_fix)
+    return ir
+
+
+def _print_to_console_fix(stmts: list) -> list:
+    out = []
+    for stmt in stmts:
+        if isinstance(stmt, PrintStmt):
+            args = stmt.args if stmt.args else [Literal(value="", kind="string")]
+            out.append(ExprStmt(expr=Call(
+                func=Attribute(obj=Name(id="console"), attr="log"),
+                args=args,
+            )))
+        else:
+            out.append(stmt)
+    return out
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Pass 16 — Clean Java type annotations for Python target
 # ─────────────────────────────────────────────────────────────────────────────
 
 _JAVA_TO_PY = {
@@ -411,7 +772,6 @@ _JAVA_TO_PY = {
 
 
 def pass_clean_java_types(ir: Module, src: str, tgt: str) -> Module:
-    """Strip Java-specific type annotations for Python target."""
     for node in _all_nodes(ir):
         if isinstance(node, FunctionDef):
             for p in node.params:
@@ -428,6 +788,101 @@ def _clean_java(ann: Optional[str]) -> Optional[str]:
     if "[" in ann or "]" in ann or "<" in ann or ">" in ann:
         return None
     return _JAVA_TO_PY.get(ann, ann)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Pass 17 — Strip C standard library headers (for C/C++ → Python)
+# ─────────────────────────────────────────────────────────────────────────────
+
+_C_STDLIB_HEADERS = {
+    "stdio.h", "stdlib.h", "string.h", "math.h", "ctype.h",
+    "assert.h", "errno.h", "float.h", "limits.h", "locale.h",
+    "signal.h", "stdarg.h", "stddef.h", "time.h", "stdbool.h",
+    "stdint.h", "unistd.h", "fcntl.h", "sys/types.h", "sys/stat.h",
+    "iostream", "fstream", "sstream", "vector", "map", "set",
+    "string", "algorithm", "cmath", "cstdlib", "cstdio",
+    "memory", "utility", "functional", "numeric", "array",
+    "list", "deque", "queue", "stack", "tuple",
+}
+
+
+def pass_strip_c_headers(ir: Module, src: str, tgt: str) -> Module:
+    ir.imports = [
+        imp for imp in ir.imports
+        if imp.module.strip() not in _C_STDLIB_HEADERS
+    ]
+    return ir
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Pass 18 — Remove C-style main() wrapper (for C/C++ → Python)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def pass_strip_c_main(ir: Module, src: str, tgt: str) -> Module:
+    new_body = []
+    main_body = []
+    for node in ir.body:
+        if isinstance(node, FunctionDef) and node.name == "main":
+            for stmt in node.body:
+                if isinstance(stmt, Return):
+                    if isinstance(stmt.value, Literal) and stmt.value.value == 0:
+                        continue
+                main_body.append(stmt)
+        else:
+            new_body.append(node)
+
+    if main_body:
+        guard = IfStmt(
+            condition=CompareOp(
+                left=Name(id="__name__"),
+                op="==",
+                right=Literal(value="__main__", kind="string"),
+            ),
+            then_body=main_body,
+            else_body=[],
+        )
+        new_body.append(guard)
+
+    ir.body = new_body
+    return ir
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Pass 19 — NEW: console.log → print for JavaScript → Python
+# ─────────────────────────────────────────────────────────────────────────────
+
+def pass_console_to_print(ir: Module, src: str, tgt: str) -> Module:
+    """
+    console.log(x) -> print(x) for JavaScript → Python translations.
+    Also handles System.out.println(x) -> print(x) for Java → Python.
+    """
+    _walk_and_fix_bodies(ir, _console_to_print_fix)
+    return ir
+
+
+def _console_to_print_fix(stmts: list) -> list:
+    out = []
+    for stmt in stmts:
+        if isinstance(stmt, ExprStmt) and isinstance(stmt.expr, Call):
+            call = stmt.expr
+            # console.log(...)
+            if (isinstance(call.func, Attribute)
+                    and isinstance(call.func.obj, Name)
+                    and call.func.obj.id == "console"
+                    and call.func.attr == "log"):
+                out.append(PrintStmt(args=call.args))
+                continue
+            # System.out.println(...)
+            if (isinstance(call.func, Attribute)
+                    and isinstance(call.func.obj, Attribute)
+                    and isinstance(call.func.obj.obj, Name)
+                    and call.func.obj.obj.id == "System"
+                    and call.func.obj.attr == "out"
+                    and call.func.attr in ("println", "print")):
+                out.append(PrintStmt(args=call.args))
+                continue
+        out.append(stmt)
+    return out
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -472,75 +927,3 @@ def _walk_and_fix_bodies(node: CanonicalNode, fix_fn):
     for handler in getattr(node, "handlers", []):
         if hasattr(handler, "body"):
             handler.body = fix_fn(handler.body)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Pass 10 — Strip C standard library headers (for C/C++ → Python)
-# ─────────────────────────────────────────────────────────────────────────────
-
-# C standard headers that have no meaning as Python imports
-_C_STDLIB_HEADERS = {
-    "stdio.h", "stdlib.h", "string.h", "math.h", "ctype.h",
-    "assert.h", "errno.h", "float.h", "limits.h", "locale.h",
-    "signal.h", "stdarg.h", "stddef.h", "time.h", "stdbool.h",
-    "stdint.h", "unistd.h", "fcntl.h", "sys/types.h", "sys/stat.h",
-    # C++ equivalents
-    "iostream", "fstream", "sstream", "vector", "map", "set",
-    "string", "algorithm", "cmath", "cstdlib", "cstdio",
-    "memory", "utility", "functional", "numeric", "array",
-    "list", "deque", "queue", "stack", "tuple",
-}
-
-
-def pass_strip_c_headers(ir: Module, src: str, tgt: str) -> Module:
-    """
-    Pass 10: Remove C/C++ standard library #include imports.
-    These become meaningless 'import stdio.h' lines in Python output.
-    """
-    from ir.nodes import Import
-    ir.imports = [
-        imp for imp in ir.imports
-        if imp.module.strip() not in _C_STDLIB_HEADERS
-    ]
-    return ir
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Pass 11 — Remove C-style main() wrapper (for C/C++ → Python)
-# ─────────────────────────────────────────────────────────────────────────────
-
-def pass_strip_c_main(ir: Module, src: str, tgt: str) -> Module:
-    """
-    Pass 11: Flatten the C main() function into top-level statements.
-    In Python there is no mandatory main() entry point, so we inline
-    the body under an `if __name__ == '__main__':` guard instead.
-    """
-    new_body = []
-    main_body = []
-    for node in ir.body:
-        if isinstance(node, FunctionDef) and node.name == "main":
-            # Collect main body, skip bare `return 0`
-            for stmt in node.body:
-                if isinstance(stmt, Return):
-                    if isinstance(stmt.value, Literal) and stmt.value.value == 0:
-                        continue  # drop return 0
-                main_body.append(stmt)
-        else:
-            new_body.append(node)
-
-    if main_body:
-        # Wrap in if __name__ == '__main__':
-        guard = IfStmt(
-            condition=CompareOp(
-                left=Name(id="__name__"),
-                op="==",
-                right=Literal(value="__main__", kind="string"),
-            ),
-            then_body=main_body,
-            else_body=[],
-        )
-        new_body.append(guard)
-
-    ir.body = new_body
-    return ir
-

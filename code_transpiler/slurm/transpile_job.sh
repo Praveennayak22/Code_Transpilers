@@ -13,13 +13,13 @@ TASK_ID=$SLURM_ARRAY_TASK_ID
 JOB_ID=$SLURM_ARRAY_JOB_ID
 
 CHUNK_DIR="/projects/data/datasets/code_data/codeLLM_data/iitgn_pt_transpiler/input/chunks"
-OUTPUT_DIR="/projects/data/datasets/code_data/codeLLM_data/iitgn_pt_transpiler/output/chunks"
-CACHE_DIR="/projects/data/datasets/code_data/codeLLM_data/iitgn_pt_transpiler/cache"
-CODE_DIR="/home/iitgn_pt_data/transpiler/code/code_transpiler"
+OUTPUT_DIR="/projects/data/datasets/code_data/codeLLM_data/iitgn_pt_transpiler/output_v6/chunks"
+CODE_DIR="/home/iitgn_pt_data/transpiler/code/code_transpiler/code_transpiler"
 LOG_DIR="/home/iitgn_pt_data/transpiler/logs/slurm"
 
-mkdir -p "$OUTPUT_DIR" "$CACHE_DIR" "$LOG_DIR"
+mkdir -p "$OUTPUT_DIR" "$LOG_DIR"
 
+# Each SLURM task processes ONE chunk file
 CHUNK_FILE=$(printf "%s/chunk_%04d.jsonl" "$CHUNK_DIR" "$TASK_ID")
 OUTPUT_FILE=$(printf "%s/out_%04d.jsonl" "$OUTPUT_DIR" "$TASK_ID")
 
@@ -48,11 +48,12 @@ fi
 source /home/iitgn_pt_data/miniconda3/etc/profile.d/conda.sh
 conda activate transpiler_env
 
-# ── Run transpiler ────────────────────────────────────────────────────────────
-python3 "$CODE_DIR/main.py" \
-    --input  "$CHUNK_FILE" \
-    --output "$OUTPUT_FILE" \
-    --cache-dir "$CACHE_DIR"
+# ── Run transpiler (batch_runner processes one chunk at a time) ───────────────
+python3 "$CODE_DIR/pipeline/batch_runner.py" \
+    --input   "$CHUNK_DIR" \
+    --output  "$OUTPUT_DIR" \
+    --workers 4 \
+    --pattern "chunk_$(printf '%04d' $TASK_ID).jsonl"
 
 EXIT_CODE=$?
 

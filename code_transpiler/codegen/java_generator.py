@@ -53,9 +53,20 @@ class JavaGenerator(BaseGenerator):
     # ── Module ────────────────────────────────────────────────────────────
 
     def generate_Module(self, node: Module) -> None:
-        # Java needs a class wrapper around everything
-        self._write("import java.util.*;")
+        # Emit imports from the IR imports list (injected by transform)
+        for imp in node.imports:
+            if imp.module:
+                self._write(f"import {imp.module};")
         self._blank()
+
+        # If transform already wrapped in a ClassDef, just emit it directly
+        has_class = any(isinstance(n, ClassDef) for n in node.body)
+        if has_class:
+            for stmt in node.body:
+                self._gen(stmt)
+            return
+
+        # Fallback: wrap everything in TranspiledCode class
         self._write("public class TranspiledCode {")
         self._indent()
         for stmt in node.body:

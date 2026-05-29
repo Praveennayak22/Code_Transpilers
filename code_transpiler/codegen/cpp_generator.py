@@ -39,11 +39,17 @@ class CppGenerator(CGenerator):
     FALSE_LITERAL = "false"
 
     def generate_Module(self, node: Module) -> None:
+        hardcoded = {"iostream", "vector", "string", "map", "cmath"}
         self._write("#include <iostream>")
         self._write("#include <vector>")
         self._write("#include <string>")
         self._write("#include <map>")
         self._write("#include <cmath>")
+        # Extra headers injected by transform (e.g. algorithm, set, stack)
+        for imp in node.imports:
+            hdr = imp.module.strip()
+            if hdr and hdr not in hardcoded:
+                self._write(f"#include <{hdr}>")
         self._blank()
         self._write("using namespace std;")
         self._blank()
