@@ -32,8 +32,11 @@ STARCODER2_PATH = (
     "bigcode_starcoder2_train_full_corpus_EXPLODED_w_CHARS_METADATA/"
 )
 
-OUTPUT_DIR = Path("/shared/transpiler/data/input/starcoder2_filtered/")
-OUTPUT_FILE = OUTPUT_DIR / "filtered_sample.parquet"
+OUTPUT_DIR = Path(
+    "/projects/data/datasets/code_data/codeLLM_data/"
+    "iitgn_pt_transpiler/input/"
+)
+OUTPUT_FILE = OUTPUT_DIR / "starcoder2_filtered_sample.parquet"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CONFIG
@@ -44,8 +47,8 @@ TARGET_LANGUAGES = ["Python", "Java", "JavaScript", "C", "C++"]
 
 # How many rows to sample per language for the dev run
 # Full dataset counts: JS=54M, Java=50M, Python=46M, C++=34M, C=15M
-# For dev/testing use 100_000; for full run use None (no limit)
-SAMPLE_PER_LANGUAGE = 100_000   # Set to None for full dataset
+# For 50k test run use 10_000; for full run use None (no limit)
+SAMPLE_PER_LANGUAGE = 10_000   # Set to None for full dataset
 
 # Quality filters — removes junk, minified, and auto-generated code
 QUALITY_FILTERS = {
@@ -60,6 +63,7 @@ QUALITY_FILTERS = {
 KEEP_COLUMNS = [
     "repo_name",
     "repo_url",
+    "github_id",
     "blob_id",           # For exact deduplication
     "path",
     "language",

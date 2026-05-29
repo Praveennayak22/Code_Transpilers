@@ -52,6 +52,10 @@ def _get_passes(source_lang: str, target_lang: str) -> List[TransformPass]:
         passes.append(pass_infer_variable_types)   # x=5 -> int x=5
     if target_lang == "Python" and source_lang == "Java":
         passes.append(pass_clean_java_types)        # Strip String[], List<T>
+    if target_lang == "Python" and source_lang in ("C", "C++"):
+        passes.append(pass_strip_c_headers)         # Remove stdio.h, stdlib.h imports
+        passes.append(pass_strip_c_main)            # Remove main() wrapper
+        passes.append(pass_clean_java_types)        # Reuse: strip any leftover type annotations
     return passes
 
 
@@ -468,3 +472,75 @@ def _walk_and_fix_bodies(node: CanonicalNode, fix_fn):
     for handler in getattr(node, "handlers", []):
         if hasattr(handler, "body"):
             handler.body = fix_fn(handler.body)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Pass 10 — Strip C standard library headers (for C/C++ → Python)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# C standard headers that have no meaning as Python imports
+_C_STDLIB_HEADERS = {
+    "stdio.h", "stdlib.h", "string.h", "math.h", "ctype.h",
+    "assert.h", "errno.h", "float.h", "limits.h", "locale.h",
+    "signal.h", "stdarg.h", "stddef.h", "time.h", "stdbool.h",
+    "stdint.h", "unistd.h", "fcntl.h", "sys/types.h", "sys/stat.h",
+    # C++ equivalents
+    "iostream", "fstream", "sstream", "vector", "map", "set",
+    "string", "algorithm", "cmath", "cstdlib", "cstdio",
+    "memory", "utility", "functional", "numeric", "array",
+    "list", "deque", "queue", "stack", "tuple",
+}
+
+
+def pass_strip_c_headers(ir: Module, src: str, tgt: str) -> Module:
+    """
+    Pass 10: Remove C/C++ standard library #include imports.
+    These become meaningless 'import stdio.h' lines in Python output.
+    """
+    from ir.nodes import Import
+    ir.imports = [
+        imp for imp in ir.imports
+        if imp.module.strip() not in _C_STDLIB_HEADERS
+    ]
+    return ir
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Pass 11 — Remove C-style main() wrapper (for C/C++ → Python)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def pass_strip_c_main(ir: Module, src: str, tgt: str) -> Module:
+    """
+    Pass 11: Flatten the C main() function into top-level statements.
+    In Python there is no mandatory main() entry point, so we inline
+    the body under an `if __name__ == '__main__':` guard instead.
+    """
+    new_body = []
+    main_body = []
+    for node in ir.body:
+        if isinstance(node, FunctionDef) and node.name == "main":
+            # Collect main body, skip bare `return 0`
+            for stmt in node.body:
+                if isinstance(stmt, Return):
+                    if isinstance(stmt.value, Literal) and stmt.value.value == 0:
+                        continue  # drop return 0
+                main_body.append(stmt)
+        else:
+            new_body.append(node)
+
+    if main_body:
+        # Wrap in if __name__ == '__main__':
+        guard = IfStmt(
+            condition=CompareOp(
+                left=Name(id="__name__"),
+                op="==",
+                right=Literal(value="__main__", kind="string"),
+            ),
+            then_body=main_body,
+            else_body=[],
+        )
+        new_body.append(guard)
+
+    ir.body = new_body
+    return ir
+

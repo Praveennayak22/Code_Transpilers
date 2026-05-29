@@ -12,11 +12,13 @@ from typing import Any
 
 
 class TreeSitterParser:
-    """Parses Java or JavaScript source using tree-sitter."""
+    """Parses Java, JavaScript, C, or C++ source using tree-sitter."""
 
     LANGUAGE_MAP = {
         "java":       "tree_sitter_java",
         "javascript": "tree_sitter_javascript",
+        "c":          "tree_sitter_c",
+        "cpp":        "tree_sitter_cpp",
     }
 
     def __init__(self, language: str):
@@ -34,14 +36,21 @@ class TreeSitterParser:
         if self._loaded:
             return
         try:
-            import tree_sitter_java
-            import tree_sitter_javascript
             from tree_sitter import Language, Parser
 
-            if self.language_name == "java":
+            lang = self.language_name
+            if lang == "java":
+                import tree_sitter_java
                 self._language = Language(tree_sitter_java.language())
-            elif self.language_name == "javascript":
+            elif lang == "javascript":
+                import tree_sitter_javascript
                 self._language = Language(tree_sitter_javascript.language())
+            elif lang == "c":
+                import tree_sitter_c
+                self._language = Language(tree_sitter_c.language())
+            elif lang == "cpp":
+                import tree_sitter_cpp
+                self._language = Language(tree_sitter_cpp.language())
             else:
                 raise ValueError(f"Unsupported language: {self.language_name}")
 
@@ -51,7 +60,8 @@ class TreeSitterParser:
         except ImportError as e:
             raise ImportError(
                 f"tree-sitter not installed. Run: "
-                f"pip install tree-sitter tree-sitter-java tree-sitter-javascript\n"
+                f"pip install tree-sitter tree-sitter-java tree-sitter-javascript "
+                f"tree-sitter-c tree-sitter-cpp\n"
                 f"Original error: {e}"
             ) from e
 

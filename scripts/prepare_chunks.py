@@ -31,11 +31,13 @@ OUTPUT_DIR = Path(
     "iitgn_pt_transpiler/input/chunks/"
 )
 
-# ── Language pairs (8 total, confirmed) ───────────────────────────────────────
+# ── Language pairs (10 total) ───────────────────────────────────────
 LANGUAGE_PAIRS = {
     "Python":     ["Java", "JavaScript", "C", "C++"],
     "Java":       ["Python", "JavaScript"],
     "JavaScript": ["Java", "Python"],
+    "C":          ["Python"],
+    "C++":        ["Python"],
 }
 
 # ── Chunk size ─────────────────────────────────────────────────────────────────

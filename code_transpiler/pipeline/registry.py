@@ -15,7 +15,7 @@ class LanguageRegistry:
     """
     Central registry mapping language names to pipeline components.
 
-    Supported source languages: Python, Java, JavaScript
+    Supported source languages: Python, Java, JavaScript, C, C++
     Supported target languages: Python, Java, JavaScript, C, C++
     """
 
@@ -29,6 +29,8 @@ class LanguageRegistry:
             "Python":     ["Java", "JavaScript", "C", "C++"],
             "Java":       ["Python", "JavaScript"],
             "JavaScript": ["Java", "Python"],
+            "C":          ["Python"],
+            "C++":        ["Python"],
         }
 
         # All valid target languages
@@ -119,6 +121,8 @@ def build_registry() -> LanguageRegistry:
     from lifting.python_lifter import PythonLifter
     from lifting.java_lifter import JavaLifter
     from lifting.javascript_lifter import JavaScriptLifter
+    from lifting.c_lifter import CLifter
+    from lifting.cpp_lifter import CppLifter
     from codegen.python_generator import PythonGenerator
     from codegen.java_generator import JavaGenerator
     from codegen.javascript_generator import JavaScriptGenerator
@@ -127,15 +131,19 @@ def build_registry() -> LanguageRegistry:
 
     registry = LanguageRegistry()
 
-    # Parsers (source languages only)
+    # Parsers (source languages)
     registry.register_parser("Python",     PythonParser())
     registry.register_parser("Java",       TreeSitterParser("java"))
     registry.register_parser("JavaScript", TreeSitterParser("javascript"))
+    registry.register_parser("C",          TreeSitterParser("c"))
+    registry.register_parser("C++",        TreeSitterParser("cpp"))
 
-    # Lifters (source languages only)
+    # Lifters (source languages)
     registry.register_lifter("Python",     PythonLifter())
     registry.register_lifter("Java",       JavaLifter())
     registry.register_lifter("JavaScript", JavaScriptLifter())
+    registry.register_lifter("C",          CLifter())
+    registry.register_lifter("C++",        CppLifter())
 
     # Generators (all 5 target languages)
     registry.register_generator("Python",     PythonGenerator())

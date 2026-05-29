@@ -18,6 +18,7 @@ from __future__ import annotations
 import time
 import hashlib
 import traceback
+import json
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -37,6 +38,9 @@ class TranspileResult:
     transpile_stage: Optional[str] = None   # which stage failed
     transpile_time_ms: int = 0
     cache_hit: bool = False
+    # Intermediate representations (saved for research/debug output schema)
+    canonical_ir_repr: Optional[str] = None    # IR after Stage 3 Lift (JSON string)
+    transformed_ir_repr: Optional[str] = None  # IR after Stage 4 Transform (JSON string)
 
 
 class PipelineRunner:
@@ -102,19 +106,23 @@ class PipelineRunner:
             parser = self.registry.get_parser(source_lang)
             syntax_tree = parser.parse(clean_source)
 
-            # ── Stage 3: Lifting ──────────────────────────────────────────
+            # ── Stage 3: Lifting ──────────────────────────────────────
             result.transpile_stage = "lifting"
             lifter = self.registry.get_lifter(source_lang)
             canonical_ir = lifter.lift(syntax_tree, clean_source)
+            # Snapshot canonical IR before transforms
+            result.canonical_ir_repr = _ir_to_str(canonical_ir)
 
             # ── Stage 4: Transforms ───────────────────────────────────────
             result.transpile_stage = "transforms"
-            canonical_ir = run_transforms(canonical_ir, source_lang, target_lang)
+            transformed_ir = run_transforms(canonical_ir, source_lang, target_lang)
+            # Snapshot transformed IR after transforms
+            result.transformed_ir_repr = _ir_to_str(transformed_ir)
 
             # ── Stage 5: Code Generation ──────────────────────────────────
             result.transpile_stage = "codegen"
             generator = self.registry.get_generator(target_lang)
-            output_code = generator.generate(canonical_ir)
+            output_code = generator.generate(transformed_ir)
 
             # Success
             result.transpiled_code = output_code
@@ -178,3 +186,29 @@ def _cache_key(source_code: str, source_lang: str, target_lang: str) -> str:
 def _elapsed_ms(start: float) -> int:
     """Return elapsed milliseconds since start."""
     return int((time.monotonic() - start) * 1000)
+
+
+def _ir_to_str(ir_node) -> str:
+    """
+    Serialise a Canonical IR node tree to a compact JSON string.
+    Injects a '_type' field for each node so the AST structure is preserved.
+    """
+    def _node_to_dict(node):
+        if isinstance(node, list):
+            return [_node_to_dict(x) for x in node]
+        if not hasattr(node, '__dataclass_fields__'):
+            return node
+        
+        d = {"_type": node.__class__.__name__}
+        for field_name in node.__dataclass_fields__:
+            val = getattr(node, field_name)
+            d[field_name] = _node_to_dict(val)
+        return d
+
+    try:
+        return json.dumps(_node_to_dict(ir_node), ensure_ascii=False)
+    except Exception:
+        try:
+            return repr(ir_node)
+        except Exception:
+            return "<ir serialisation error>"
