@@ -87,16 +87,35 @@ class JavaGenerator(BaseGenerator):
     def _format_function_signature(self, node: FunctionDef,
                                     params_str: str, ret: str) -> str:
         modifier = node.access_modifier or "public"
-        static = " static" if node.is_static else ""
+        # Don't make methods static if they are inside a class (instance methods)
+        # Only keep static if explicitly set AND we're not inside a class context
+        inside_class = getattr(self, '_current_class', None) is not None
+        is_constructor = inside_class and node.name == getattr(self, '_current_class', None)
+        if is_constructor:
+            # Java constructors have no return type
+            return f"{modifier} {node.name}({params_str})"
+        static = " static" if (node.is_static and not inside_class) else ""
         return f"{modifier}{static} {ret} {node.name}({params_str})"
 
+    # ── this. for self references (mirrors C++ this-> fix) ────────────────
+
+    def expr_Attribute(self, node) -> str:
+        """Convert _this_cpp_ref.x sentinel → this.x in Java."""
+        obj = self._gen_expr(node.obj)
+        if obj == "_this_cpp_ref":
+            return f"this.{node.attr}"
+        return f"{obj}.{node.attr}"
+
     def generate_ClassDef(self, node: ClassDef) -> None:
+        # Track current class so we can detect constructors and avoid static
+        self._current_class = node.name
         extends = f" extends {node.bases[0]}" if node.bases else ""
         self._write(f"public class {node.name}{extends} {{")
         self._indent()
         self._gen_body(node.body)
         self._dedent()
         self._write("}")
+        self._current_class = None
 
     def generate_VarDecl(self, node: VarDecl) -> None:
         java_type = _java_type(node.type_annotation)

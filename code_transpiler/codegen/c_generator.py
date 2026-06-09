@@ -106,13 +106,19 @@ class CGenerator(BaseGenerator):
         self._write("}")
 
     def generate_ClassDef(self, node: ClassDef) -> None:
-        # C has no classes — generate as a struct
+        # C has no classes — generate as a struct (fields only).
+        # Methods are skipped: their bodies contain Python-style expressions
+        # (e.g. self.x = y) that produce invalid C. LLM repair handles these.
         self._write(f"typedef struct {{")
         self._indent()
+        has_fields = False
         for stmt in node.body:
             if isinstance(stmt, FunctionDef):
-                continue  # Skip methods (C structs can't have methods)
+                continue  # Skip methods — C structs can't have methods
             self._gen(stmt)
+            has_fields = True
+        if not has_fields:
+            self._write(f"int _placeholder;")
         self._dedent()
         self._write(f"}} {node.name};")
 

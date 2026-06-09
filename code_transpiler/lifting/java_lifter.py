@@ -90,7 +90,35 @@ class JavaLifter:
                 for c in child.children:
                     if c.type == "type_identifier":
                         bases.append(self._text(c))
+            elif child.type == "super_interfaces":
+                # implements Interface1, Interface2
+                for c in child.children:
+                    if c.type == "type_list":
+                        for t in c.children:
+                            if t.type == "type_identifier":
+                                bases.append(self._text(t))
+                    elif c.type == "type_identifier":
+                        bases.append(self._text(c))
             elif child.type == "class_body":
+                body = self._lift_class_body(child)
+        return ClassDef(name=name, bases=bases, body=body,
+                        source_line=node.start_point[0])
+
+    def _lift_interface_declaration(self, node) -> ClassDef:
+        """Lift a Java interface as a ClassDef (treated as abstract class)."""
+        name = ""
+        bases = []
+        body = []
+        for child in node.children:
+            if child.type == "identifier":
+                name = self._text(child)
+            elif child.type == "extends_interfaces":
+                for c in child.children:
+                    if c.type == "type_list":
+                        for t in c.children:
+                            if t.type == "type_identifier":
+                                bases.append(self._text(t))
+            elif child.type == "interface_body":
                 body = self._lift_class_body(child)
         return ClassDef(name=name, bases=bases, body=body,
                         source_line=node.start_point[0])
@@ -226,33 +254,47 @@ class JavaLifter:
                           source_line=node.start_point[0])
 
     def _lift_for_statement(self, node) -> Optional[CanonicalNode]:
-        # Enhanced for: for (Type x : iterable)
         children = list(node.children)
         text = self._text(node)
+
+        # Enhanced for: for (Type x : iterable) { }
         if ":" in text:
-            # Enhanced for loop
-            target = ""
-            iterable = None
-            body = []
-            target_type = None
             for child in children:
                 if child.type == "enhanced_for_statement":
                     return self._lift_node(child)
-            # Parse manually
-            in_parens = False
-            for child in children:
-                if child.type == "block":
-                    body = self._lift_block(child)
-            return ForEachLoop(target=target, iterable=iterable, body=body,
-                               source_line=node.start_point[0])
-        # Standard for loop
+            # Fallback: let _lift_enhanced_for_statement handle it
+            return self._lift_enhanced_for_statement(node)
+
+        # Standard for: for (init; condition; update) { }
+        # Tree-sitter splits the header into exactly these child types
         init = None
         cond = None
-        upd = None
+        upd  = None
         body = []
+        semicolons_seen = 0
         for child in children:
-            if child.type == "block":
+            if child.type == "for":
+                continue
+            elif child.type in ("(", ")"):
+                continue
+            elif child.type == ";": 
+                semicolons_seen += 1
+            elif child.type == "block":
                 body = self._lift_block(child)
+            elif semicolons_seen == 0:
+                # Before first semicolon → init
+                if child.type == "local_variable_declaration":
+                    init = self._lift_node(child)
+                elif child.is_named:
+                    init = self._lift_expr(child)
+            elif semicolons_seen == 1:
+                # Between first and second semicolon → condition
+                if child.is_named:
+                    cond = self._lift_expr(child)
+            elif semicolons_seen == 2:
+                # After second semicolon → update
+                if child.is_named:
+                    upd = self._lift_expr(child)
         return ForLoop(init=init, condition=cond, update=upd, body=body,
                        source_line=node.start_point[0])
 
