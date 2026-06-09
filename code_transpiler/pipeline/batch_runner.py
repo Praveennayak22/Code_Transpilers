@@ -79,6 +79,8 @@ def _transpile_row(row: dict) -> dict:
             "transformed_IR":   "",
             "target_code":      "",
             "target_language":  tlang,
+            "source_char_count": len(src),
+            "target_char_count": 0,
             "source_compiles":  None,
             "target_compiles":  None,
             "transpile_success": False,
@@ -102,7 +104,8 @@ def _transpile_row(row: dict) -> dict:
             from pipeline.compiler_check import check_compiles
             target_compiles, _ = check_compiles(result.transpiled_code, tlang)
 
-        # ── Build the strict 11-column output row ─────────────────────────
+        # ── Build the strict output row ────────────────────────────────────
+        target_code = result.transpiled_code or ""
         return {
             # Provenance metadata (from StarCoder2)
             "repo_name":        row.get("repo_name", ""),
@@ -115,9 +118,12 @@ def _transpile_row(row: dict) -> dict:
             "source_code":      result.source_code,
             "canonical_IR":     result.canonical_ir_repr or "",
             "transformed_IR":   result.transformed_ir_repr or "",
-            "target_code":      result.transpiled_code or "",
+            "target_code":      target_code,
             "target_language":  tlang,
-            # Tracking metrics (kept in JSONL, dropped at Parquet merge stage)
+            # Character counts
+            "source_char_count": len(result.source_code) if result.source_code else 0,
+            "target_char_count": len(target_code),
+            # Tracking metrics
             "source_compiles":  source_compiles,
             "target_compiles":  target_compiles,
             "transpile_success": result.transpile_success,
@@ -138,6 +144,8 @@ def _transpile_row(row: dict) -> dict:
             "transformed_IR":   "",
             "target_code":      "",
             "target_language":  tlang,
+            "source_char_count": len(src),
+            "target_char_count": 0,
             "source_compiles":  source_compiles,
             "target_compiles":  None,
             "transpile_success": False,

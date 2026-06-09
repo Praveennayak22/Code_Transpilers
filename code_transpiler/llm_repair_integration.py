@@ -44,8 +44,8 @@ class RepairEnabledPipelineRunner(PipelineRunner):
     
     def __init__(self, registry, cache=None, 
                  use_llm_repair: bool = False,
-                 llm_endpoint: str = "http://soketlab-node060:30000/v1/chat/completions",
-                 repair_max_attempts: int = 2):
+                 llm_endpoint: str = "http://172.17.99.11:30000/v1/chat/completions",
+                 repair_max_attempts: int = 3):
         """
         Args:
             registry: Language registry
@@ -61,6 +61,7 @@ class RepairEnabledPipelineRunner(PipelineRunner):
             self.repair_engine = RepairEngine(
                 llm_endpoint=llm_endpoint,
                 max_attempts=repair_max_attempts,
+                auth_token="AVTXOTWZab9v8WExZMNcGXdCFPCmon4LQPMWP6iS32w2",
                 verbose=False
             )
         else:
@@ -109,26 +110,37 @@ class RepairEnabledPipelineRunner(PipelineRunner):
             
             # Code generated but won't compile - attempt repair
             result.initial_compile_fail = True
-            repair_result = self.repair_engine.repair(
-                result.transpiled_code,
-                target_lang,
-                source_lang
-            )
             
-            result.repair_attempted = True
-            result.repair_success = repair_result.repair_success
-            result.repair_attempts = repair_result.total_attempts
-            result.llm_tokens_used = repair_result.llm_tokens_used
-            result.repaired_code = repair_result.final_code
-            
-            if repair_result.repair_success:
-                # Replace transpiled code with repaired version
-                result.transpiled_code = repair_result.final_code
-                result.transpile_success = True  # Mark as ultimately successful
+            try:
+                repair_result = self.repair_engine.repair(
+                    code=result.transpiled_code,
+                    target_lang=target_lang,
+                    source_lang=source_lang,
+                    source_code=source_code  # Pass original source for regeneration on empty
+                )
+                
+                result.repair_attempted = True
+                result.repair_success = repair_result.repair_success
+                result.repair_attempts = repair_result.total_attempts
+                result.llm_tokens_used = repair_result.llm_tokens_used
+                result.repaired_code = repair_result.final_code
+                
+                if repair_result.repair_success:
+                    # Replace transpiled code with repaired version
+                    result.transpiled_code = repair_result.final_code
+                    result.transpile_success = True  # Mark as ultimately successful
+                    
+            except Exception as repair_error:
+                # Repair loop crashed - mark as attempted but failed
+                result.repair_attempted = True
+                result.repair_success = False
+                result.repair_attempts = 0
+                result.llm_tokens_used = 0
+                # Silently continue - don't crash pipeline
                 
         except Exception as e:
-            # Repair failed, but don't crash the pipeline
-            result.repair_attempted = True
+            # Compiler check failed, but don't crash the pipeline
+            result.repair_attempted = False
             result.repair_success = False
         
         return result

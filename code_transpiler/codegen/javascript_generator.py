@@ -45,24 +45,38 @@ class JavaScriptGenerator(BaseGenerator):
     def generate_FunctionDef(self, node: FunctionDef) -> None:
         params_str = self._gen_params(node.params)
         async_kw = "async " if node.is_async else ""
-        self._write(f"{async_kw}function {node.name}({params_str}) {{")
+        if getattr(self, '_in_class', False):
+            # Inside class body: no 'function' keyword (ES6 class method syntax)
+            # __init__ → constructor
+            name = "constructor" if node.name == "__init__" else node.name
+            self._write(f"{async_kw}{name}({params_str}) {{")
+        else:
+            self._write(f"{async_kw}function {node.name}({params_str}) {{")
         self._indent()
         self._gen_body(node.body)
         self._dedent()
         self._write("}")
 
+
     def generate_ClassDef(self, node: ClassDef) -> None:
         extends = f" extends {node.bases[0]}" if node.bases else ""
         self._write(f"class {node.name}{extends} {{")
         self._indent()
+        self._in_class = True       # suppress 'function' keyword in methods
         self._gen_body(node.body)
+        self._in_class = False
         self._dedent()
         self._write("}")
 
     def generate_Assignment(self, node: Assignment) -> None:
         target = self._gen_expr(node.target)
         value = self._gen_expr(node.value)
-        self._write(f"let {target} = {value};")
+        # Don't add 'let' for attribute assignments (self.x = ..., obj.attr = ...)
+        if isinstance(node.target, Attribute):
+            self._write(f"{target} = {value};")
+        else:
+            self._write(f"let {target} = {value};")
+
 
     def generate_VarDecl(self, node: VarDecl) -> None:
         kw = "const" if node.is_const else "let"

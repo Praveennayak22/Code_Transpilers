@@ -373,10 +373,37 @@ class JavaLifter:
         return Name(id=self._text(node))
 
     def _expr_decimal_integer_literal(self, node) -> Literal:
-        return Literal(value=int(self._text(node)), kind="int")
+        """e.g. 42, 10L, 1000l — strip Java suffixes before parsing."""
+        val = self._parse_number(self._text(node))
+        if val is None:
+            val = 0
+        kind = "float" if isinstance(val, float) else "int"
+        return Literal(value=val, kind=kind)
+
+    def _expr_long_integer_literal(self, node) -> Literal:
+        """e.g. 10L, 0L — Java long literal."""
+        return self._expr_decimal_integer_literal(node)
+
+    def _expr_hex_integer_literal(self, node) -> Literal:
+        """e.g. 0xFF, 0xDEAD — Java hex literal."""
+        val = self._parse_number(self._text(node))
+        if val is None:
+            val = 0
+        return Literal(value=val, kind="int")
+
+    def _expr_octal_integer_literal(self, node) -> Literal:
+        """e.g. 0777 — Java octal literal."""
+        return self._expr_decimal_integer_literal(node)
+
+    def _expr_binary_integer_literal(self, node) -> Literal:
+        """e.g. 0b1010 — Java binary literal."""
+        return self._expr_decimal_integer_literal(node)
 
     def _expr_decimal_floating_point_literal(self, node) -> Literal:
-        return Literal(value=float(self._text(node).rstrip("fFdD")), kind="float")
+        val = self._parse_number(self._text(node))
+        if val is None:
+            val = 0.0
+        return Literal(value=float(val), kind="float")
 
     def _expr_string_literal(self, node) -> Literal:
         text = self._text(node)

@@ -69,7 +69,8 @@ class CGenerator(BaseGenerator):
             for s in node.body
         )
         if not has_main:
-            non_funcs = [s for s in node.body if not isinstance(s, FunctionDef)]
+            non_funcs = [s for s in node.body
+                         if not isinstance(s, (FunctionDef, ClassDef, Comment))]
             if non_funcs:
                 self._write("int main() {")
                 self._indent()

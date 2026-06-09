@@ -65,6 +65,7 @@ def _get_passes(source_lang: str, target_lang: str) -> List[TransformPass]:
 
     # ── → C / C++ ─────────────────────────────────────────────────────────────
     if target_lang in ("C", "C++"):
+        passes.append(pass_strip_docstrings)           # NEW — always fires
         passes.append(pass_strip_python_globals)
         passes.append(pass_flatten_main_guard)
         passes.append(pass_strip_python_typing)
@@ -73,19 +74,27 @@ def _get_passes(source_lang: str, target_lang: str) -> List[TransformPass]:
         passes.append(pass_input_to_scanf)
         passes.append(pass_string_methods_to_c)
         passes.append(pass_infer_variable_types)
-        passes.append(pass_inject_c_headers)      # NEW — always fires
+        passes.append(pass_rename_c_keywords)          # NEW — rename reserved words
+        if target_lang == "C++":
+            passes.append(pass_strip_self_from_methods)  # NEW — self→this, __init__→ctor
+            passes.append(pass_arr_append_to_push_back)  # NEW — arr_append→push_back
+        passes.append(pass_inject_c_headers)
 
     # ── → Java ────────────────────────────────────────────────────────────────
     elif target_lang == "Java":
-        passes.append(pass_python_types_to_java)   # NEW — always fires on typed params
-        passes.append(pass_print_to_system_out)    # NEW — always fires
-        passes.append(pass_inject_java_imports)    # NEW — always fires
-        passes.append(pass_wrap_in_java_class)     # NEW — always fires
+        passes.append(pass_strip_docstrings)           # strip docstrings first
+        passes.append(pass_strip_self_from_methods)    # NEW — remove self, __init__→ctor
+        passes.append(pass_rename_c_keywords)          # NEW — char→char_var etc.
+        passes.append(pass_python_types_to_java)
+        passes.append(pass_print_to_system_out)
+        passes.append(pass_inject_java_imports)
+        passes.append(pass_wrap_in_java_class)
 
     # ── → JavaScript ──────────────────────────────────────────────────────────
     elif target_lang == "JavaScript":
-        passes.append(pass_print_to_console_log)   # NEW — always fires
-        passes.append(pass_vars_to_let)            # NEW — always fires
+        passes.append(pass_strip_docstrings)           # NEW — raw strings → comments
+        passes.append(pass_print_to_console_log)
+        passes.append(pass_vars_to_let)
 
     # ── → Python ──────────────────────────────────────────────────────────────
     elif target_lang == "Python":
@@ -96,7 +105,7 @@ def _get_passes(source_lang: str, target_lang: str) -> List[TransformPass]:
             passes.append(pass_strip_c_main)
             passes.append(pass_clean_java_types)
         if source_lang == "JavaScript":
-            passes.append(pass_console_to_print)   # NEW — always fires
+            passes.append(pass_console_to_print)
 
     return passes
 
@@ -503,13 +512,11 @@ def pass_inject_c_headers(ir: Module, src: str, tgt: str) -> Module:
         except ValueError:
             return 999
 
-    # Prepend headers to ir.imports (deduplicate)
-    existing = {imp.module for imp in ir.imports}
-    new_imports = []
+    # REPLACE ir.imports with only valid C headers (discard Python imports like 'numpy')
+    ordered_headers = []
     for hdr in sorted(needed, key=_hdr_key):
-        if hdr not in existing:
-            new_imports.append(Import(module=hdr))
-    ir.imports = new_imports + ir.imports
+        ordered_headers.append(Import(module=hdr))
+    ir.imports = ordered_headers
     return ir
 
 
@@ -634,10 +641,8 @@ def pass_inject_java_imports(ir: Module, src: str, tgt: str) -> Module:
         if isinstance(node, Name) and node.id in _JAVA_TYPE_TO_IMPORT:
             needed.add(_JAVA_TYPE_TO_IMPORT[node.id])
 
-    existing_modules = {imp.module for imp in ir.imports}
-    new_imports = [Import(module=m) for m in sorted(needed)
-                   if m not in existing_modules]
-    ir.imports = new_imports + ir.imports
+    # REPLACE ir.imports with only valid Java imports (discard Python imports)
+    ir.imports = [Import(module=m) for m in sorted(needed)]
     return ir
 
 
@@ -654,6 +659,7 @@ def pass_wrap_in_java_class(ir: Module, src: str, tgt: str) -> Module:
         }
 
     If there is already a top-level ClassDef, leave it as-is (don't double-wrap).
+    If source already has a function named 'main', don't add a second one.
     """
     # Check if already has a top-level class (don't double-wrap)
     has_class = any(isinstance(n, ClassDef) for n in ir.body)
@@ -671,18 +677,27 @@ def pass_wrap_in_java_class(ir: Module, src: str, tgt: str) -> Module:
         else:
             statements.append(node)
 
-    # Build a main() method from the top-level statements
+    # Don't add main(String[] args) if there's already a function named 'main'
+    has_existing_main = any(f.name == "main" for f in functions)
     main_body = statements if statements else []
-    main_method = FunctionDef(
-        name="main",
-        params=[Param(name="args", type_annotation="String[]")],
-        body=main_body,
-        return_type="void",
-        is_static=True,
-        access_modifier="public",
-    )
 
-    class_body = functions + ([main_method] if main_body else [])
+    if has_existing_main:
+        # Append top-level statements into the existing main() body
+        for fn in functions:
+            if fn.name == "main" and main_body:
+                fn.body = fn.body + main_body
+                break
+        class_body = functions
+    else:
+        main_method = FunctionDef(
+            name="main",
+            params=[Param(name="args", type_annotation="String[]")],
+            body=main_body,
+            return_type="void",
+            is_static=True,
+            access_modifier="public",
+        )
+        class_body = functions + ([main_method] if main_body else [])
 
     if not class_body:
         return ir   # Nothing to wrap
@@ -807,10 +822,21 @@ _C_STDLIB_HEADERS = {
 
 
 def pass_strip_c_headers(ir: Module, src: str, tgt: str) -> Module:
-    ir.imports = [
-        imp for imp in ir.imports
-        if imp.module.strip() not in _C_STDLIB_HEADERS
-    ]
+    """
+    Strip ALL C/C++ headers from imports when targeting Python.
+    Uses pattern-matching rather than a fixed allowlist so that custom
+    project headers (main.h, kvm.h, bits/stdc++.h, etc.) are also removed.
+    """
+    def _is_c_header(module: str) -> bool:
+        m = module.strip()
+        return (
+            m in _C_STDLIB_HEADERS           # known stdlib headers
+            or m.endswith('.h')              # any .h file (main.h, fb.h, kvm.h)
+            or m.endswith('.hpp')            # any .hpp file (Human.hpp)
+            or '/' in m                      # path-style (sys/types.h, bits/stdc++.h)
+            or '+' in m                      # bits/stdc++.h
+        )
+    ir.imports = [imp for imp in ir.imports if not _is_c_header(imp.module)]
     return ir
 
 
@@ -927,3 +953,181 @@ def _walk_and_fix_bodies(node: CanonicalNode, fix_fn):
     for handler in getattr(node, "handlers", []):
         if hasattr(handler, "body"):
             handler.body = fix_fn(handler.body)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Pass 20 — NEW: Strip Python docstrings → C/C++/Java comments
+# ─────────────────────────────────────────────────────────────────────────────
+
+from ir.nodes import Comment   # noqa: E402  (already imported at top via *)
+
+def pass_strip_docstrings(ir: Module, src: str, tgt: str) -> Module:
+    """
+    ExprStmt(Literal(kind="string")) at the top of function/class bodies
+    is a Python docstring. In C/C++/Java it becomes a syntax error.
+    Convert them to Comment nodes so the generator emits // ...
+    """
+    _walk_and_fix_bodies(ir, _docstring_fix)
+    return ir
+
+
+def _docstring_fix(stmts: list) -> list:
+    out = []
+    for stmt in stmts:
+        if (isinstance(stmt, ExprStmt)
+                and isinstance(stmt.expr, Literal)
+                and stmt.expr.kind == "string"):
+            # Convert to a comment instead of a dangling string literal
+            text = str(stmt.expr.value).replace("\n", " ").strip()
+            out.append(Comment(text=text))
+        else:
+            out.append(stmt)
+    return out
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Pass 21 — NEW: Rename Python variable names that are C/C++ reserved keywords
+# ─────────────────────────────────────────────────────────────────────────────
+
+# C and C++ reserved keywords that cannot be used as variable names
+_C_KEYWORDS = {
+    "auto", "break", "case", "char", "const", "continue", "default",
+    "do", "double", "else", "enum", "extern", "float", "for", "goto",
+    "if", "inline", "int", "long", "register", "restrict", "return",
+    "short", "signed", "sizeof", "static", "struct", "switch", "typedef",
+    "union", "unsigned", "void", "volatile", "while",
+    # C++ extras
+    "class", "new", "delete", "this", "template", "namespace", "using",
+    "virtual", "override", "public", "private", "protected", "friend",
+    "operator", "explicit", "true", "false", "nullptr", "bool",
+    "try", "catch", "throw", "noexcept", "const_cast", "dynamic_cast",
+    "reinterpret_cast", "static_cast", "typeid", "typename",
+}
+
+_RENAMED: dict = {}   # module-level cache reset per pass call
+
+
+def pass_rename_c_keywords(ir: Module, src: str, tgt: str) -> Module:
+    """
+    Rename any variable/param/function name that collides with a C/C++ keyword.
+    e.g. Python variable `char` → `char_var`, `int` → `int_var`
+    """
+    _RENAMED.clear()
+    _rename_keywords_in_node(ir)
+    return ir
+
+
+def _safe_name(name: str) -> str:
+    if name in _C_KEYWORDS:
+        safe = f"{name}_var"
+        _RENAMED[name] = safe
+        return safe
+    return name
+
+
+def _rename_keywords_in_node(node: CanonicalNode):
+    if node is None:
+        return
+    # Rename Name references
+    if isinstance(node, Name):
+        node.id = _safe_name(node.id)
+    # Rename VarDecl names
+    elif isinstance(node, VarDecl):
+        node.name = _safe_name(node.name)
+    # Rename Param names
+    elif isinstance(node, Param):
+        node.name = _safe_name(node.name)
+    # Rename FunctionDef names (but NOT __init__, main, etc.)
+    elif isinstance(node, FunctionDef):
+        if node.name not in ("main", "__init__", "constructor"):
+            node.name = _safe_name(node.name)
+    # Recurse into all children
+    for v in node.__dict__.values():
+        if isinstance(v, CanonicalNode):
+            _rename_keywords_in_node(v)
+        elif isinstance(v, list):
+            for item in v:
+                if isinstance(item, CanonicalNode):
+                    _rename_keywords_in_node(item)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Pass 22 — NEW: Strip `self` from C++ method params, __init__ → constructor
+# ─────────────────────────────────────────────────────────────────────────────
+
+def pass_strip_self_from_methods(ir: Module, src: str, tgt: str) -> Module:
+    """
+    For C++ target:
+    1. Remove `self` as first parameter from all methods inside ClassDef.
+    2. Rename `__init__` → the class name (C++ constructor).
+    3. Convert `self.attr` → `attr` (member access without explicit self).
+    """
+    for node in _all_nodes(ir):
+        if isinstance(node, ClassDef):
+            class_name = node.name
+            for item in node.body:
+                if isinstance(item, FunctionDef):
+                    # Strip self from params
+                    if item.params and item.params[0].name == "self":
+                        item.params = item.params[1:]
+                    # Rename __init__ to constructor (class name)
+                    if item.name == "__init__":
+                        item.name = class_name
+                        item.return_type = None  # constructors have no return type
+                    # Strip self. prefixes in attribute access inside body
+                    _strip_self_refs(item)
+    return ir
+
+
+def _strip_self_refs(node: CanonicalNode):
+    """
+    Replace every Name(id='self') → Name(id='_this_cpp_ref') recursively.
+    The C++ generator converts _this_cpp_ref.attr → this->attr via expr_Attribute.
+    Works by mutating Name nodes in place (dataclass fields are mutable).
+    """
+    if node is None:
+        return
+    # If this node IS a Name with id 'self', rename it
+    if isinstance(node, Name) and node.id == "self":
+        node.id = "_this_cpp_ref"
+        return
+    for fname, fval in list(node.__dict__.items()):
+        if isinstance(fval, CanonicalNode):
+            _strip_self_refs(fval)
+        elif isinstance(fval, list):
+            for item in fval:
+                if isinstance(item, CanonicalNode):
+                    _strip_self_refs(item)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Pass 23 — NEW: arr_append(x, val) → x.push_back(val) for C++
+# ─────────────────────────────────────────────────────────────────────────────
+
+_ARR_SHIM_MAP = {
+    "arr_append":  "push_back",
+    "arr_extend":  "insert",
+    "arr_pop":     "pop_back",
+    "arr_sort":    "sort",
+    "arr_reverse": "reverse",
+    "arr_index":   "find",
+    "arr_count":   "count",
+}
+
+
+def pass_arr_append_to_push_back(ir: Module, src: str, tgt: str) -> Module:
+    """
+    Convert arr_append(container, val) → container.push_back(val).
+    Also handles other arr_* shim functions we generate.
+    """
+    for node in _all_nodes(ir):
+        if isinstance(node, ExprStmt) and isinstance(node.expr, Call):
+            call = node.expr
+            if isinstance(call.func, Name) and call.func.id in _ARR_SHIM_MAP:
+                method = _ARR_SHIM_MAP[call.func.id]
+                if call.args:
+                    container = call.args[0]
+                    rest_args = call.args[1:]
+                    call.func = Attribute(obj=container, attr=method)
+                    call.args = rest_args
+    return ir

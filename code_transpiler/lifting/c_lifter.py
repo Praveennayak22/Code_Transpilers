@@ -39,13 +39,21 @@ class CLifter:
             result = self._lift_node(child)
             if result is None:
                 continue
-            if isinstance(result, Import):
-                imports.append(result)
-            elif isinstance(result, list):
-                body.extend(result)
-            else:
-                body.append(result)
+            self._dispatch_result(result, body, imports)
         return Module(body=body, imports=imports)
+
+    def _dispatch_result(self, result, body, imports):
+        """Recursively dispatch a result (node or list) into body/imports."""
+        if result is None:
+            return
+        if isinstance(result, list):
+            for item in result:
+                self._dispatch_result(item, body, imports)
+        elif isinstance(result, Import):
+            imports.append(result)
+        else:
+            body.append(result)
+
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -87,11 +95,172 @@ class CLifter:
         module = text.replace("#include", "").strip().strip("<>\"")
         return Import(module=module, source_line=node.start_point[0])
 
-    def _lift_preproc_def(self, node) -> None:
-        # #define MAX 100 — skip for now (could map to constant VarDecl)
+    def _lift_preproc_def(self, node) -> Optional[VarDecl]:
+        """#define MAX 100 → MAX = 100 (Python constant)"""
+        text = self._text(node).strip()
+        # Remove leading #define
+        rest = text[len("#define"):].strip()
+        parts = rest.split(None, 1)  # split on first whitespace
+        name = parts[0] if parts else ""
+        val_text = parts[1].strip() if len(parts) > 1 else ""
+        # Skip function-like macros: #define FOO(x) ...
+        if "(" in name:
+            return None
+        # Skip empty #define guards like #define HEADER_H
+        if not val_text:
+            return None
+        # Try to parse value
+        value = None
+        try:
+            value = Literal(value=int(val_text, 0), kind="int")
+        except (ValueError, TypeError):
+            try:
+                value = Literal(value=float(val_text), kind="float")
+            except (ValueError, TypeError):
+                if val_text.startswith('"') or val_text.startswith("'"):
+                    value = Literal(value=val_text.strip('"\' '), kind="string")
+                else:
+                    value = Name(id=val_text)
+        if name:
+            return VarDecl(name=name, type_annotation=None, value=value,
+                           source_line=node.start_point[0])
+        return None
+
+    def _lift_preproc_ifdef(self, node) -> Optional[list]:
+        """#ifdef / #ifndef GUARD ... #endif — lift all enclosed declarations"""
+        results = []
+        for child in node.children:
+            # Skip the guard name identifier and the #define/#endif markers
+            if child.type in ("#ifdef", "#ifndef", "#endif", "#else",
+                              "identifier", "preproc_arg"):
+                continue
+            r = self._lift_node(child)
+            if r is None:
+                continue
+            if isinstance(r, list):
+                results.extend(r)
+            else:
+                results.append(r)
+        return results if results else None
+
+    def _lift_preproc_ifndef(self, node) -> Optional[list]:
+        """#ifndef GUARD ... #endif — same as ifdef, lift enclosed content"""
+        return self._lift_preproc_ifdef(node)
+
+    def _lift_preproc_if(self, node) -> Optional[list]:
+        """#if CONDITION ... #endif — lift enclosed content"""
+        return self._lift_preproc_ifdef(node)
+
+    def _lift_preproc_elif(self, node) -> None:
+        return None
+
+    def _lift_preproc_else(self, node) -> Optional[list]:
+        """#else branch — lift its contents too"""
+        return self._lift_preproc_ifdef(node)
+
+    def _lift_preproc_endif(self, node) -> None:
+        return None
+
+    def _lift_preproc_function_def(self, node) -> None:
+        """#define FOO(x) ... function-like macro — skip"""
+        return None
+
+    def _lift_preproc_call(self, node) -> None:
+        """Preprocessor calls like #pragma once — skip"""
         return None
 
     def _lift_comment(self, node) -> None:
+        return None
+
+    def _lift_declaration(self, node) -> Optional[CanonicalNode]:
+        """int x = 5; or int x; or function declarations like void foo(int x);"""
+        type_ann = None
+        name = ""
+        value = None
+        is_func_decl = False
+        params = []
+        for child in node.children:
+            if child.type in ("primitive_type", "type_identifier",
+                              "sized_type_specifier"):
+                type_ann = self._text(child)
+            elif child.type == "init_declarator":
+                for c in child.children:
+                    if c.type == "identifier":
+                        name = self._text(c)
+                    elif c.type not in ("=",):
+                        value = self._lift_expr(c)
+            elif child.type == "function_declarator":
+                # This is a function declaration (no body): void foo(int x);
+                is_func_decl = True
+                for c in child.children:
+                    if c.type == "identifier":
+                        name = self._text(c)
+                    elif c.type == "parenthesized_declarator":
+                        for cc in c.children:
+                            if cc.type == "identifier":
+                                name = self._text(cc)
+                    elif c.type == "parameter_list":
+                        params = self._lift_parameter_list(c)
+            elif child.type == "identifier":
+                name = self._text(child)
+            elif child.type == "pointer_declarator":
+                for c in child.children:
+                    if c.type in ("identifier", "function_declarator"):
+                        if c.type == "function_declarator":
+                            is_func_decl = True
+                            for cc in c.children:
+                                if cc.type == "identifier":
+                                    name = self._text(cc)
+                                elif cc.type == "parameter_list":
+                                    params = self._lift_parameter_list(cc)
+                        else:
+                            name = self._text(c)
+            elif child.type == "storage_class_specifier":  # extern, static
+                pass
+        if is_func_decl and name:
+            # Emit as a stub FunctionDef with a pass body
+            return FunctionDef(
+                name=name, params=params,
+                body=[ExprStmt(expr=Literal(value=None, kind="null"),
+                               source_line=node.start_point[0])],
+                return_type=type_ann,
+                source_line=node.start_point[0],
+            )
+        if name:
+            return VarDecl(name=name, type_annotation=type_ann, value=value,
+                           source_line=node.start_point[0])
+        return None
+
+    def _lift_type_definition(self, node) -> Optional[CanonicalNode]:
+        """typedef struct { ... } Alias; or typedef int MyInt;"""
+        alias_name = ""
+        inner = None
+        for child in node.children:
+            if child.type == "type_identifier":
+                alias_name = self._text(child)  # last type_identifier is alias
+            elif child.type in ("struct_specifier", "enum_specifier",
+                                "union_specifier"):
+                inner = self._lift_node(child)
+        if inner and alias_name:
+            # rename the struct to the typedef alias
+            if hasattr(inner, "name") and not inner.name:
+                inner.name = alias_name
+            return inner
+        if alias_name:
+            return VarDecl(name=alias_name, type_annotation=None, value=None,
+                           source_line=node.start_point[0])
+        return None
+
+    def _lift_linkage_specification(self, node) -> Optional[CanonicalNode]:
+        """extern "C" { ... } — lift the inner declarations"""
+        for child in node.children:
+            if child.type == "declaration_list":
+                results = []
+                for c in child.children:
+                    r = self._lift_node(c)
+                    if r:
+                        results.append(r)
+                return results if results else None
         return None
 
     def _lift_function_definition(self, node) -> FunctionDef:

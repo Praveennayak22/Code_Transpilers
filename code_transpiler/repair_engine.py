@@ -54,30 +54,37 @@ class RepairEngine:
     """Orchestrates LLM-based code repair."""
     
     def __init__(self, 
-                 llm_endpoint: str = "http://soketlab-node060:30000/v1/chat/completions",
+                 llm_endpoint: str = "http://172.17.99.11:30000/v1/chat/completions",
                  max_attempts: int = 3,
+                 auth_token: str = "AVTXOTWZab9v8WExZMNcGXdCFPCmon4LQPMWP6iS32w2",
                  verbose: bool = False):
         """
         Args:
             llm_endpoint: CodeLLM API endpoint
             max_attempts: Maximum repair attempts (1-3 recommended)
+            auth_token: Bearer token for LLM endpoint authorization
             verbose: Print debug info
         """
-        self.llm_client = CodeLLMClient(endpoint=llm_endpoint)
+        self.llm_client = CodeLLMClient(endpoint=llm_endpoint, auth_token=auth_token)
         self.max_attempts = max_attempts
         self.verbose = verbose
     
     def repair(self,
                code: str,
                target_lang: str,
-               source_lang: str = "Unknown") -> RepairResult:
+               source_lang: str = "Unknown",
+               source_code: str = None) -> RepairResult:
         """
-        Attempt to repair code using LLM.
+        Attempt to repair or regenerate code using LLM.
+        
+        For empty code: regenerates from source_code (REGENERATE mode)
+        For broken code: fixes using compiler error (FIX mode)
         
         Args:
-            code: The transpiled code to potentially repair
+            code: The transpiled code to potentially repair (may be empty)
             target_lang: Target language (e.g., "C", "Java")
             source_lang: Original source language
+            source_code: Original source code (for regeneration on empty)
         
         Returns:
             RepairResult with final_code and repair_success
@@ -91,7 +98,18 @@ class RepairEngine:
             source_lang=source_lang
         )
         
-        # Check if initial code compiles
+        # Detect if code is empty
+        is_empty = not code or len(code.strip()) == 0
+        
+        if is_empty:
+            # REGENERATE MODE: Empty code detected - use source to regenerate
+            if self.verbose:
+                print(f"  Empty code detected - attempting regeneration from source...")
+            return self._regenerate_from_source(
+                source_code, target_lang, source_lang, result, start_time
+            )
+        
+        # FIX MODE: Non-empty code - try to repair
         checker = get_checker(target_lang)
         initial_check = checker.check(code)
         
@@ -157,6 +175,82 @@ class RepairEngine:
         result.final_code = result.final_code or current_code
         result.total_attempts = len(result.repair_attempts)
         result.repair_time_ms = (time.monotonic() - start_time) * 1000
+        
+        return result
+    
+    def _regenerate_from_source(self, source_code: str,
+                               target_lang: str,
+                               source_lang: str,
+                               result: RepairResult,
+                               start_time) -> RepairResult:
+        """
+        Regenerate target code from source code (for empty transpilation).
+        
+        REGENERATE mode: Ask LLM "Generate {target_lang} code from this {source_lang} source"
+        Used when transpiler produces empty output.
+        """
+        import time
+        
+        if not source_code or len(source_code.strip()) == 0:
+            # Can't regenerate without source
+            result.repair_success = False
+            result.repair_attempts = []
+            result.total_attempts = 0
+            result.repair_time_ms = (time.monotonic() - start_time) * 1000
+            return result
+        
+        current_code = ""
+        checker = get_checker(target_lang)
+        
+        for attempt_num in range(1, self.max_attempts + 1):
+            if self.verbose:
+                print(f"  Regeneration attempt {attempt_num}/{self.max_attempts}...")
+            
+            # Call LLM to regenerate from source
+            llm_response = self.llm_client.regenerate_code(
+                source_code,
+                target_lang,
+                source_lang
+            )
+            
+            if not llm_response.success:
+                if self.verbose:
+                    print(f"    LLM failed: {llm_response.error}")
+                break
+            
+            generated_code = llm_response.fixed_code
+            
+            # Try to compile the generated code
+            compile_check = checker.check(generated_code)
+            
+            attempt = RepairAttempt(
+                attempt_number=attempt_num,
+                generated_code=source_code[:200],  # Source for context
+                compiler_error="Empty transpilation - regenerating from source",
+                llm_response=llm_response,
+                fixed_code=generated_code,
+                compile_result=compile_check,
+                success=compile_check.success
+            )
+            result.repair_attempts.append(attempt)
+            result.llm_tokens_used += llm_response.usage_tokens
+            
+            if compile_check.success:
+                # SUCCESS!
+                result.final_code = generated_code
+                result.repair_success = True
+                if self.verbose:
+                    print(f"    ✅ Regenerated on attempt {attempt_num}")
+                break
+            else:
+                current_code = generated_code
+                if self.verbose:
+                    print(f"    ❌ Still broken: {compile_check.error_message[:100]}")
+        
+        result.final_code = result.final_code or current_code
+        result.total_attempts = len(result.repair_attempts)
+        result.repair_time_ms = (time.monotonic() - start_time) * 1000
+        result.initial_compile_fail = True  # Mark as initial failure
         
         return result
     

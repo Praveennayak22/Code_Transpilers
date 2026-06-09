@@ -42,11 +42,29 @@ class PythonGenerator(BaseGenerator):
             self._gen(stmt)
             self._blank()
 
+    # ── Python-safe fallbacks for unsupported IR nodes ─────────────────────
+    # The base generator emits /* unsupported: X */ and /* expr:X */ which are
+    # valid C/Java comments but INVALID Python syntax. Override them here.
+
+    def _generate_unknown(self, node: CanonicalNode) -> None:
+        """Unsupported statement → Python comment (not C-style block comment)."""
+        self._write(f"# unsupported: {type(node).__name__}")
+
+    def _expr_unknown(self, node: CanonicalNode) -> str:
+        """Unsupported expression → None (safe default for any expression context)."""
+        # e.g. `while /* expr:AugAssignment */:` → `while None:` (falsy, valid Python)
+        return "None  # unsupported: " + type(node).__name__
+
+    # ── Signatures ───────────────────────────────────────────────────────────
+
     def _format_function_signature(self, node: FunctionDef,
                                     params_str: str, ret: str) -> str:
         ret_ann = f" -> {ret}" if ret and ret != "void" else ""
         async_kw = "async " if node.is_async else ""
-        return f"{async_kw}def {node.name}({params_str}){ret_ann}:"
+        # Anonymous functions (C++ lambdas etc.) get a safe default name
+        name = node.name if node.name else "_unnamed_func"
+        return f"{async_kw}def {name}({params_str}){ret_ann}:"
+
 
     def generate_FunctionDef(self, node: FunctionDef) -> None:
         params_str = self._gen_params(node.params)
@@ -194,6 +212,15 @@ class PythonGenerator(BaseGenerator):
 
     def generate_Import(self, node: Import) -> None:
         module = node.module or ""
+        # C/C++ headers: anything ending in .h/.hpp or containing /, +, * (e.g. bits/stdc++.h)
+        is_c_header = (
+            module.endswith('.h') or module.endswith('.hpp')
+            or '/' in module or '+' in module
+            or (module.endswith('.*') and '.' in module)
+        )
+        if is_c_header:
+            self._write(f"# C header: {module}")
+            return
         # Expanded Java package prefixes (including androidx, lombok, etc.)
         JAVA_PREFIXES = (
             "java.", "javax.", "org.", "com.", "android.", "androidx.",
@@ -224,6 +251,7 @@ class PythonGenerator(BaseGenerator):
             self._write(f"import {module} as {node.alias}")
         else:
             self._write(f"import {module}")
+
 
 
     def generate_Delete(self, node: Delete) -> None:

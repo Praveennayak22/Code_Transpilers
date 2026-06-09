@@ -40,12 +40,7 @@ class CppLifter(CLifter):
             result = self._lift_node(child)
             if result is None:
                 continue
-            if isinstance(result, Import):
-                imports.append(result)
-            elif isinstance(result, list):
-                body.extend(result)
-            else:
-                body.append(result)
+            self._dispatch_result(result, body, imports)
         return Module(body=body, imports=imports)
 
     # ── C++ specific statements ───────────────────────────────────────────────

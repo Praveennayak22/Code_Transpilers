@@ -157,6 +157,7 @@ def _preprocess(source_code: str) -> str:
     - Strip BOM marker
     - Strip shell shebang lines
     - Strip trailing whitespace
+    - Convert Python 2 print statements to Python 3 print() calls
     """
     # Normalize line endings
     code = source_code.replace("\r\n", "\n").replace("\r", "\n")
@@ -173,6 +174,26 @@ def _preprocess(source_code: str) -> str:
 
     # Strip trailing whitespace from each line
     code = "\n".join(line.rstrip() for line in code.split("\n"))
+
+    # ── Python 2 print statement → Python 3 print() ──────────────────────────
+    # Converts: print "hello"     → print("hello")
+    #           print x, y        → print(x, y)
+    #           print x,          → print(x, end='')
+    # Does NOT touch: print(...)  which is already Python 3
+    import re
+    def _py2_print_replacer(m):
+        indent = m.group(1)
+        args = m.group(2).strip()
+        if args.endswith(","):
+            return f"{indent}print({args.rstrip(',').strip()}, end='')"
+        return f"{indent}print({args})"
+
+    code = re.sub(
+        r'^(\s*)print\s+(?!\()(.+)$',
+        _py2_print_replacer,
+        code,
+        flags=re.MULTILINE
+    )
 
     return code.strip()
 

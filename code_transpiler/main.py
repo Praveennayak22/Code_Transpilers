@@ -161,6 +161,9 @@ def main():
                 "source_lang":       source_lang,
                 "target_lang":       target_lang,
                 "content":           source_code,
+                # Character counts
+                "source_char_count": len(source_code),
+                "target_char_count": len(result.transpiled_code) if result.transpiled_code else 0,
                 # Transpilation results
                 "transpiled_code":   result.transpiled_code,
                 "transpile_success": result.transpile_success,
